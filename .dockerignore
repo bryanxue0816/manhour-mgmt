@@ -1,0 +1,57 @@
+# Build-context exclusions.
+#
+# Why this file is not optional: without it `docker build .` uploads
+# node_modules (929 MB / ~51,000 files) and .next (the previous build's output)
+# into the daemon before a single instruction runs. That is slow, and worse, a
+# host-built node_modules contains Windows PE .node addons that would shadow the
+# Linux ones installed inside the image - producing a runtime
+# "invalid ELF header" that looks like a corrupt image rather than a leaked
+# build context.
+
+# Patterns are matched with Go's filepath.Match against the context-relative
+# path, so a bare `*.db` would match only the root level and let prisma/dev.db
+# through. Every data/dependency pattern below is therefore written with `**/`.
+
+# Dependencies and build output - reinstalled/rebuilt inside the image.
+**/node_modules
+.next
+out
+build
+dist
+
+# Live data. dev.db is the production database on the dev box; it must be
+# bind-mounted at runtime, never baked into an image layer (an image layer is
+# immutable and would ship real attendance data to anyone who pulls it).
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+backups
+data
+
+# Secrets. Only .env.production.example belongs in the context.
+.env
+.env.local
+.env.*.local
+.env.production
+
+# Local tooling and VCS.
+.git
+.gitignore
+.vscode
+.idea
+**/*.log
+npm-debug.log*
+
+# Tests and docs are not needed by the runtime image. They stay in the repo.
+tests
+docs
+**/*.md
+
+# Sample spreadsheets used for manual import testing (hundreds of KB each).
+**/*.xls
+**/*.xlsx
+
+# Scratch files. The leading-underscore convention is used for throwaway
+# probe scripts during development; none should ever reach a build.
+_*

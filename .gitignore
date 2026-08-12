@@ -28,9 +28,25 @@ yarn-error.log*
 # local env files
 .env*.local
 
+# Production env. Only .env.production.example is tracked. Without this line
+# .env.production would be committed - `.env` and `.env*.local` above do not
+# match it.
+.env.production
+
 # vercel
 .vercel
 
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/src/generated/prisma
+
+# prisma local db & env
+.env
+*.db
+*.db-journal
+
+# Backup output from scripts/backup-db.mjs. The *.db line above already covers
+# the files themselves; this keeps the directory out too.
+/backups/

@@ -1,0 +1,151 @@
+# Production compose file for the man-hour management app (SQLite edition).
+#
+# ============================================================================
+# NOT VERIFIED ON A MACHINE. Docker is not installed on the machine this was
+# written on, so this file has never been parsed by `docker compose`, and the
+# image it describes has never been built. Every value here is derived from
+# measured application behaviour (see the comments), but the first person to
+# run this should expect to fix something. Start with:
+#     docker compose -f docker-compose.prod.yml config     # parse + interpolate
+#     docker compose -f docker-compose.prod.yml build      # exercises the Dockerfile
+# See docs/DEPLOY.md for the full first-deploy procedure.
+# ============================================================================
+#
+# Run from the `app/` directory (the build context and the location of this
+# file, the Dockerfile, and nginx.conf):
+#     docker compose -f docker-compose.prod.yml up -d
+#
+# There is no `version:` key. It has been obsolete since Compose v2 and current
+# versions print a warning when it is present.
+
+services:
+  # --------------------------------------------------------------------------
+  # app - the Next.js standalone server
+  # --------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: manhour-mgmt:latest
+    restart: unless-stopped
+
+    # No `ports:` mapping. This is deliberate and is half of the D-008 access
+    # control story: the app is reachable only from the compose network, so the
+    # nginx IP allowlist cannot be bypassed by hitting the app's port directly.
+    # Publishing 3000 here would silently defeat nginx entirely.
+    expose:
+      - "3000"
+
+    # env_file carries DATABASE_URL and ORG_DATA_SOURCE. It is NOT baked into
+    # the image, so rotating it needs only a restart, and the connection string
+    # never lands in image history where `docker history` would reveal it.
+    #
+    # Copy .env.production.example to .env.production and edit before first
+    # start. `docker compose up` fails outright if the file is missing, which is
+    # the desired failure mode - a missing DATABASE_URL would otherwise let the
+    # app start and serve DEMO DATA at HTTP 200 (see below).
+    env_file:
+      - .env.production
+
+    environment:
+      NODE_ENV: production
+      # Business dates do not depend on this - src/lib/db/date.ts pins
+      # Asia/Shanghai explicitly via Intl.DateTimeFormat. TZ is set so that log
+      # timestamps and backup filenames (which use LOCAL time) read the way the
+      # operator expects; a UTC container would name an 04:00 backup "20:00".
+      TZ: Asia/Shanghai
+      NEXT_TELEMETRY_DISABLED: "1"
+
+    volumes:
+      # THE DATABASE. A bind mount, not an image layer and not a named volume.
+      #
+      # - Not a layer: layers are immutable and would ship real attendance data
+      #   to anyone who pulls the image, and every rebuild would silently revert
+      #   the database to the build-time snapshot.
+      # - Not a named volume: named volumes live inside Docker's storage
+      #   directory, which makes the file that holds all production data
+      #   awkward to back up, inspect, and restore with ordinary host tooling.
+      #   A bind mount means scripts/backup-db.mjs and the recovery drill in
+      #   docs/DEPLOY.md operate on a path the operator can see.
+      #
+      # ### THE PERMISSION TRAP - READ THIS ###
+      # The container runs as uid 1000 (the `node` user). If ./data is not
+      # writable by uid 1000 on the HOST, SQLite fails to open the file for
+      # write, Prisma raises an error, src/lib/org-source.ts classifies it as an
+      # infrastructure fault, and the dashboard DEGRADES TO DEMO DATA WHILE
+      # STILL RETURNING HTTP 200. The failure is invisible to any check that
+      # only looks at status codes. On the host, before first start:
+      #     mkdir -p data backups
+      #     sudo chown -R 1000:1000 data backups
+      # And verify after start per the health check in docs/DEPLOY.md, which
+      # asserts the ABSENCE of the 演示数据 marker rather than a 200.
+      #
+      # A bind mount replaces the directory created in the Dockerfile and
+      # carries host ownership with it, so the Dockerfile's chown does not help
+      # here. That is why this must be done host-side.
+      - ./data:/app/data
+
+      # Backup destination for scripts/backup-db.mjs. Bind-mounted for the same
+      # reason: a backup the operator cannot reach from the host is not a backup.
+      - ./backups:/app/backups
+
+    # SQLite is a single file accessed by one process. Two app replicas would
+    # contend on the same file and, because the schema runs in journal_mode
+    # =delete rather than WAL, would produce SQLITE_BUSY under concurrent
+    # writes. Scaling out requires the PostgreSQL migration (batch 5B), not a
+    # higher replica count here.
+    deploy:
+      replicas: 1
+
+    # No healthcheck. This is a considered omission, not an oversight: the app
+    # returns HTTP 200 on / even when the database is unreachable, because it
+    # falls back to demo data. Any naive `curl -f /` check would report GREEN on
+    # a deployment that is serving fabricated numbers - actively worse than no
+    # check, since it manufactures false confidence. A correct check must assert
+    # the absence of the 演示数据 marker; that logic lives in docs/DEPLOY.md
+    # where it can be read and understood rather than hidden in a one-liner.
+
+    # Container logs are the only diagnostic record here (there is no log
+    # aggregation). Capped so a crash loop cannot fill the host disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --------------------------------------------------------------------------
+  # nginx - reverse proxy and, per D-008, the entire access control layer
+  # --------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+
+    # The only published port. Plain HTTP: D-007 puts this on the intranet with
+    # no public exposure, and there is no certificate authority in scope for v1.
+    # If this ever leaves the intranet, HTTPS stops being optional - passwordless
+    # access (D-008) over plaintext on a routable network is not defensible.
+    ports:
+      - "80:80"
+
+    volumes:
+      # Read-only: nginx never needs to write its own config, and this file is
+      # the access control policy. Mounting it rw would let a container
+      # compromise rewrite the allowlist.
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+
+    # `depends_on` waits for the container to be created, NOT for the app to be
+    # listening. nginx starting first is harmless - the upstream is resolved per
+    # request, so early requests get a 502 for a few seconds and then recover.
+    depends_on:
+      - app
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# No top-level `networks:` block. Compose creates a default bridge network for
+# the project and both services join it, which is exactly what is needed:
+# nginx reaches the app as `app:3000` via Docker's embedded DNS, and nothing
+# outside the project can reach the app at all.

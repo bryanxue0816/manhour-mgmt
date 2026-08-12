@@ -1,36 +1,70 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 工时管理系统（Man-Hour Management System）
 
-## Getting Started
+月度工时「计划 / 挑战 / 实绩」可视化管控台。公司内网自部署，v1 免登录。
 
-First, run the development server:
+> 设计文档：[../DESIGN.md](../DESIGN.md) · 决策记录：[../DECISIONS.md](../DECISIONS.md) · 实现计划：[../IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md)
+
+## 技术栈
+
+- Next.js 14 (App Router) + TypeScript
+- shadcn/ui + Tailwind CSS
+- Recharts 3
+- Prisma 7 + SQLite（dev）/ PostgreSQL（prod，Phase 2 起）
+- SheetJS (xlsx)
+
+## 环境要求
+
+- Node.js >= 18.17（本机 v24.15.0）
+- npm
+
+## 快速开始
 
 ```bash
+# 安装依赖
+npm install
+
+# 同步数据库（SQLite，首次会创建 dev.db）
+npx prisma db push
+
+# 启动开发服务器
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+访问 <http://localhost:3000>
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 目录结构
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```text
+src/
+├── app/              # Next.js App Router（layout / page / globals.css）
+├── components/
+│   ├── layout/       # AppShell 三栏布局
+│   ├── nav/          # Breadcrumb 面包屑
+│   ├── tree/         # OrgTree 组织树导航
+│   └── ui/           # shadcn/ui 组件
+├── generated/prisma/ # Prisma client（生成产物，已 gitignore）
+└── lib/
+    ├── prisma.ts     # Prisma client 单例
+    └── utils.ts      # shadcn 工具函数
+prisma/
+└── schema.prisma     # 数据模型
+```
 
-## Learn More
+## 开发阶段
 
-To learn more about Next.js, take a look at the following resources:
+见 [../IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md)：
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- Phase 0 脚手架与基础设施（当前）
+- Phase 1 v0.1 看板 demo（mock 数据）
+- Phase 2 数据层与主数据（切 PostgreSQL + Docker）
+- Phase 3 计划工时录入
+- Phase 4 考勤抓取与实绩计算
+- Phase 5 真实数据接通 + 部署收尾
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 数据库切换（Phase 2）
 
-## Deploy on Vercel
+dev 用 SQLite（零依赖）。Phase 2 切 PostgreSQL：
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. 改 `prisma/schema.prisma` 的 `provider` 为 `postgresql`
+2. 改 `.env` 的 `DATABASE_URL` 为 PostgreSQL 连接串
+3. `npx prisma db push`

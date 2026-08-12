@@ -1,0 +1,364 @@
+// Prisma schema - v1 dev uses SQLite via an explicit driver adapter (Prisma 7 requirement).
+// Migration to PostgreSQL is deferred; every SQLite-specific compromise is tagged `// [PG]`
+// with the exact change required when the provider is switched.
+//
+// SQLite limitations worked around in this file:
+//   1. No `enum`            -> String columns constrained by TypeScript union types
+//   2. No `Decimal`         -> Float (double precision is exact for hours <= 1e5 with 1 decimal)
+//   3. No date-only type    -> DateTime required to be a calendar day at UTC midnight,
+//                              enforced by lib/db/date.ts#assertCalendarDay (rejects a
+//                              value carrying a time component; it does NOT truncate -
+//                              callers holding an instant convert via businessDayOf)
+//   4. No partial indexes   -> FiscalYear.isCurrent uniqueness enforced in a transaction
+//   5. No native `@db.*` types
+//   6. `createMany` has no skipDuplicates -> seed uses upsert loops inside one transaction
+//   7. No case-insensitive filters (`mode: 'insensitive'`)
+//   8. No Json / scalar-list columns
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ---------------------------------------------------------------------------
+// Organisation
+// ---------------------------------------------------------------------------
+
+/// A department (部). 7 rows for FY2026, imported from FY26组织结构.xlsx.
+/// `name` is the natural key: org changes are applied as a full Excel re-upload
+/// with upsert-by-name, and history is never deleted (D-153).
+model Department {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  code         String?  @unique
+  /// Excel row order. Drives UI ordering; the dashboard addresses departments
+  /// by array index, so this must stay stable across re-imports.
+  sortOrder    Int
+  /// Department-level owner (部长). Source rows with an empty 課名 column (D-150).
+  managerName  String?
+  managerEmail String?
+  createdAt    DateTime @default(now())
+
+  sections Section[]
+
+  @@index([sortOrder])
+  @@map("department")
+}
+
+/// A section (課). 24 rows for FY2026. All plan/actual hours attach here -
+/// it is the finest granularity the dashboard drills down to.
+model Section {
+  id           String   @id @default(cuid())
+  departmentId String
+  name         String
+  sortOrder    Int
+  managerName  String?
+  /// Deliberately NOT unique: one person may own several sections (D-150).
+  managerEmail String?
+  createdAt    DateTime @default(now())
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  plans      Plan[]
+  actuals    Actual[]
+  aliases    SectionAlias[]
+  attendance AttendanceRaw[]
+
+  /// (部, 課) is the composite natural key used by the re-import upsert (D-153).
+  @@unique([departmentId, name])
+  @@index([departmentId, sortOrder])
+  @@map("section")
+}
+
+// ---------------------------------------------------------------------------
+// Fiscal year
+// ---------------------------------------------------------------------------
+
+/// A fiscal year running April 1 -> March 31. Month numbers on Plan/Actual are
+/// 1..12 relative to this window, where 1 = April (D-004).
+model FiscalYear {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  year      Int      @unique
+  startDate DateTime
+  endDate   DateTime
+  /// At most one row may be true. SQLite has no partial unique index, so this is
+  /// enforced by fiscal-year.repo.ts#setCurrentFiscalYear inside a transaction.
+  /// [PG] replace with: CREATE UNIQUE INDEX ... ON fiscal_year (is_current) WHERE is_current
+  isCurrent Boolean  @default(false)
+
+  plans   Plan[]
+  actuals Actual[]
+
+  @@map("fiscal_year")
+}
+
+// ---------------------------------------------------------------------------
+// Plan (target hours, manually maintained)
+// ---------------------------------------------------------------------------
+
+/// Monthly planned and challenge hours per section.
+/// 288 rows per fiscal year (24 sections x 12 months).
+model Plan {
+  id             String   @id @default(cuid())
+  sectionId      String
+  fiscalYearId   String
+  /// 1..12, where 1 = April. Guarded by assertFiscalMonth() at every write site.
+  month          Int
+  /// [PG] Decimal @db.Decimal(12, 2)
+  plannedHours   Float
+  /// Independently entered business data - never derived from plannedHours.
+  /// May legally equal or exceed plannedHours (D-151).
+  /// [PG] Decimal @db.Decimal(12, 2)
+  challengeHours Float
+  updatedAt      DateTime @updatedAt
+  updatedBy      String   @default("system")
+
+  section    Section         @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  fiscalYear FiscalYear      @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+  changeLogs PlanChangeLog[]
+
+  @@unique([sectionId, fiscalYearId, month])
+  @@index([fiscalYearId, month])
+  @@map("plan")
+}
+
+/// Append-only audit trail for plan edits (D-143). Written only by
+/// lib/db/plan-change-log.repo.ts, always inside the same transaction as the
+/// plan write it records - see upsertPlanWithAudit().
+model PlanChangeLog {
+  id          String   @id @default(cuid())
+  planId      String
+  /// 'planned_hours' | 'challenge_hours'
+  field       String
+  beforeValue Float
+  afterValue  Float
+  reason      String?
+  changedAt   DateTime @default(now())
+  changedBy   String
+
+  plan Plan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@index([planId, changedAt])
+  @@map("plan_change_log")
+}
+
+// ---------------------------------------------------------------------------
+// Actual (aggregated attendance hours)
+// ---------------------------------------------------------------------------
+
+/// Monthly aggregated actual hours per section. This IS the MonthlyAggregate of
+/// D-126 ("the dashboard always reads the aggregate, never the raw detail") -
+/// deliberately one table, not two, so Phase 4 writes straight into it.
+/// Recomputed from AttendanceRaw by lib/attendance/calc.ts (D-111 / D-126).
+model Actual {
+  id             String    @id @default(cuid())
+  sectionId      String
+  fiscalYearId   String
+  month          Int
+  /// D-104: columns R + S of the attendance export.
+  /// [PG] Decimal @db.Decimal(12, 2)
+  personnelHours Float     @default(0)
+  /// D-105: Z+AA+AB+AD-AF-AV-AY-BA. Negative values are legal.
+  /// [PG] Decimal @db.Decimal(12, 2)
+  overtimeHours  Float     @default(0)
+  /// personnelHours + overtimeHours. Denormalised on purpose: D-126 requires the
+  /// dashboard to read the aggregate without query-time arithmetic, and keeping
+  /// the sum as a column makes "negative overtime pushed total below personnel"
+  /// anomalies directly queryable.
+  /// [PG] Decimal @db.Decimal(12, 2)
+  totalHours     Float     @default(0)
+  sourceFile     String?
+  fetchedAt      DateTime?
+  lastComputedAt DateTime  @updatedAt
+
+  section    Section    @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  fiscalYear FiscalYear @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+
+  @@unique([sectionId, fiscalYearId, month])
+  @@index([fiscalYearId, month])
+  @@map("actual")
+}
+
+// ---------------------------------------------------------------------------
+// Reference data
+// ---------------------------------------------------------------------------
+
+/// System key-value config (e.g. daily_standard_hours = 8).
+model Config {
+  key         String   @id
+  value       String
+  description String?
+  updatedAt   DateTime @updatedAt
+
+  @@map("config")
+}
+
+/// Working-day calendar (D-202). Used to prorate monthly targets by elapsed
+/// working days rather than calendar days.
+///
+/// DORMANT - 0 rows, no readers, no writers (D-168, 2026-08-07). A working day is
+/// whatever the daily attendance upload says it is; v1 maintains no standalone
+/// calendar. Kept for the documented re-introduction trigger (any requirement whose
+/// denominator is 应出勤天数 / 工作日数). `remark` is unused for the same reason:
+/// a computed day type has no author to record.
+/// See src/lib/db/work-calendar.repo.ts for the full rationale.
+model WorkCalendar {
+  /// Date-only semantics. SQLite has no DATE type, so every value must ALREADY be a
+  /// calendar day at UTC midnight: lib/db/date.ts#assertCalendarDay rejects anything
+  /// carrying a time component rather than truncating it, on both write and read.
+  /// A timestamped value would be a distinct primary key and silently duplicate the day.
+  /// [PG] add @db.Date
+  date      DateTime @id
+  /// '工作日' | '周末' | '节假日' | '年例休'
+  dayType   String
+  remark    String?
+  updatedAt DateTime @updatedAt
+
+  @@index([dayType])
+  @@map("work_calendar")
+}
+
+/// Per-job-title exclusion rules for attendance aggregation (D-109).
+/// Preseeded from the D-107 (personnel) and D-108 (overtime) exclusion sets,
+/// extended by D-161 with 工场长 / 高级课长 (5 rows -> 7 rows).
+model JobTitleRule {
+  jobTitle              String   @id
+  /// D-107: exclude this title's hours from personnelHours.
+  excludePersonnelHours Boolean  @default(false)
+  /// D-108: exclude this title's hours from overtimeHours.
+  excludeOvertimeHours  Boolean  @default(false)
+  remark                String?
+  updatedAt             DateTime @updatedAt
+
+  @@map("job_title_rule")
+}
+
+// ---------------------------------------------------------------------------
+// Attendance import (Phase 4)
+// ---------------------------------------------------------------------------
+
+/// Maps an HR-export (部别, 课别) pair onto a Section when the two sides spell the
+/// name differently. Exists because the strings are visually identical but are NOT
+/// equal: the HR export writes 检查课 (查 = U+67E5) where the org master writes
+/// 检査课 (査 = U+67FB). Measured on the real workbook: 25 rows, silently
+/// unattributable, and silent in BOTH directions - the section reports zero actuals
+/// while its hours pile up in the unattributed bucket. Neither side is "wrong", so
+/// this is a translation table rather than a data fix on either master.
+model SectionAlias {
+  id            String   @id @default(cuid())
+  /// 部别 exactly as it appears in the attendance export.
+  hrDeptName    String
+  /// 课别 exactly as it appears in the attendance export.
+  hrSectionName String
+  sectionId     String
+  remark        String?
+  createdAt     DateTime @default(now())
+
+  section Section @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+
+  /// One HR-side spelling resolves to exactly one Section.
+  @@unique([hrDeptName, hrSectionName])
+  @@index([sectionId])
+  @@map("section_alias")
+}
+
+/// One attendance row per employee per day (D-122). The unique key is
+/// (employeeNo, workDate), so re-importing the same day upserts in place and keeps
+/// no version history - D-122 states the latest fetch is authoritative.
+///
+/// Stores the 10 formula input columns rather than only the derived totals. D-161
+/// is the proof this matters: the exclusion lists grew after the fact, and with
+/// only post-exclusion figures on hand the whole month would have to be re-fetched
+/// from HR to recompute. With the inputs retained, Actual is rebuildable from the
+/// database alone.
+model AttendanceRaw {
+  id           String @id @default(cuid())
+  /// 工号. String, NOT Int: measured as a 6-digit string, and an Int would silently
+  /// drop a leading zero if HR ever issues one.
+  employeeNo   String
+  employeeName String?
+  /// 出勤日期. Arrives as an Excel 1900 serial number (measured: 46204) and is
+  /// converted with the 1899-12-30 epoch, which absorbs Excel's 1900 leap-year bug.
+  /// Date-only semantics, same contract as WorkCalendar.date: the value must ALREADY
+  /// be a calendar day at UTC midnight (lib/db/date.ts#assertCalendarDay).
+  /// [PG] add @db.Date
+  workDate     DateTime
+
+  /// 部别 / 课别 / 职务 / 员工类别 as exported, kept verbatim for traceability.
+  /// hrSectionName is nullable: 35 measured rows carry no 课别 at all (支援人员 and
+  /// department-level managers), and those rows must still be storable.
+  hrDeptName       String
+  hrSectionName    String?
+  jobTitle         String?
+  employeeCategory String?
+  /// Resolved Section, via exact (部, 課) match then SectionAlias. NULL means the row
+  /// could not be attributed to any section - it is deliberately still imported
+  /// ("默认全额计入 + 未归属可见告警") and surfaces in the /actuals warning banner.
+  sectionId        String?
+
+  /// D-104 inputs: 请假时间 + 上班时数.
+  leaveHours        Float @default(0)
+  workHours         Float @default(0)
+  /// D-105 additive inputs: 平时加班 + 休日双倍 + 节假加班 + 休日调休.
+  normalOvertime    Float @default(0)
+  restDayDouble     Float @default(0)
+  holidayOvertime   Float @default(0)
+  restDayCompensate Float @default(0)
+  /// D-105 subtractive inputs: 调休假时数, 产假时数, 护理假时数, 流产假时数.
+  compensatoryLeave Float @default(0)
+  maternityLeave    Float @default(0)
+  nursingLeave      Float @default(0)
+  miscarriageLeave  Float @default(0)
+
+  /// Derived per row, pre-exclusion. Denormalised for the same reason as
+  /// Actual.totalHours: it makes a single employee's contribution directly
+  /// queryable when an aggregate looks wrong.
+  personnelHours Float @default(0)
+  /// D-105 may legitimately be negative (measured: 课长 aggregates to -8).
+  overtimeHours  Float @default(0)
+  totalHours     Float @default(0)
+
+  /// Exclusion verdict applied at import time, from JobTitleRule (D-109).
+  excludedPersonnel Boolean @default(false)
+  excludedOvertime  Boolean @default(false)
+
+  sourceFile String
+  importedAt DateTime @default(now())
+
+  section Section? @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+
+  /// D-122: idempotent upsert key. Re-import overwrites the same day in place.
+  @@unique([employeeNo, workDate])
+  @@index([workDate])
+  @@index([sectionId, workDate])
+  @@map("attendance_raw")
+}
+
+/// One row per fetch attempt (D-123), success or failure. Failures are recorded
+/// rather than thrown away: the 06:00 fetch retries hourly until 18:00, and the
+/// /actuals status panel has to show that the retries happened.
+model ImportLog {
+  id           String    @id @default(cuid())
+  fileName     String
+  /// Source mtime, used to tell "HR has not published today's file yet" apart from
+  /// "the file is there but unreadable".
+  fileMtime    DateTime?
+  importedAt   DateTime  @default(now())
+  /// 'SUCCESS' | 'FAILED' | 'PARTIAL' (D-123). SQLite has no enum; validated in the
+  /// repo against IMPORT_STATUSES so a typo cannot become a fourth silent state.
+  /// [PG] replace with a real enum
+  status       String
+  /// Rows actually written. 0 on FAILED.
+  rowCount     Int       @default(0)
+  errorMessage String?
+  /// 'schedule' | 'manual' | 'retry' (D-123).
+  triggeredBy  String
+
+  @@index([importedAt])
+  @@index([status, importedAt])
+  @@map("import_log")
+}

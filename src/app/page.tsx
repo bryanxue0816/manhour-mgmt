@@ -1,101 +1,66 @@
-import Image from "next/image";
+/**
+ * Home (dashboard) page - server shell.
+ *
+ * A Server Component whose only job is to resolve the data source and hand a
+ * ready-made org tree to the client shell. All interactivity (drill-down state,
+ * memoized derivations, Recharts) lives in DashboardClient.
+ *
+ * Phase 3 reads live data (ORG_DATA_SOURCE=db); set the flag to "mock" for a
+ * pixel-identical Phase 1 demo. Every database access goes through
+ * loadDashboardOrg(), which owns the degrade-vs-fail policy - do not add a second
+ * repository call to this file, or a setup failure will bypass that policy.
+ *
+ * `force-dynamic` is required now that the header label comes from the database:
+ * without it Next would prerender this route at build time and open a connection
+ * on a machine that has no dev.db, exactly as /admin and /plans document.
+ */
+import type { ReactElement } from "react";
 
-export default function Home() {
+import { loadDashboardOrg } from "@/lib/org-source";
+import { MainNav } from "@/components/layout/MainNav";
+import { DashboardClient } from "./_components/DashboardClient";
+import { ImportStalenessBanner } from "./_components/ImportStalenessBanner";
+
+export const dynamic = "force-dynamic";
+
+export default async function Home(): Promise<ReactElement> {
+  // One call, not two. loadDashboardOrg() already resolves the fiscal year in
+  // order to load the tree, and it applies the infrastructure-vs-corrupt-data
+  // policy to that read. Calling findCurrentFiscalYear() again here in parallel
+  // bypassed the policy: on a machine with no dev.db the tree degraded to mock
+  // exactly as designed, then the unguarded sibling read rejected and 500'd the
+  // whole dashboard over a header label. Verified by pointing DATABASE_URL at a
+  // nonexistent directory.
+  const { org, source, fiscalYearName, fiscalYearStartYear, importStaleness } =
+    await loadDashboardOrg();
+
+  // A fallback must never look like live data. Mock and seed agree on 财务课
+  // April plan (both 1045), so without this marker a degraded page is
+  // indistinguishable from a real report - someone would read demo numbers as
+  // an actual account. `source` is what loadDashboardOrg() actually produced,
+  // which may differ from the ORG_DATA_SOURCE flag it was asked for.
+  const isFallback = process.env.ORG_DATA_SOURCE === "db" && source === "mock";
+
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+    <DashboardClient
+      org={org}
+      nav={<MainNav active="dashboard" />}
+      // D-124's red banner. The verdict rides along in loadDashboardOrg()'s return value
+      // rather than being read here, so it inherits that function's degrade-vs-fail
+      // policy - which is also why it is null whenever the tree degraded to the mock:
+      // 「从未成功导入」 stamped on demo numbers would name the wrong problem, and the
+      // 「· 演示数据」 label already names the right one.
+      banner={<ImportStalenessBanner staleness={importStaleness} />}
+      // Null when the tree is the mock: its months are FY2026 fixtures, so the
+      // client falls back to the hard-coded FY2026 labels rather than dating demo
+      // data with a real year (D-165).
+      fiscalYearStartYear={fiscalYearStartYear}
+      // "未设置财年" rather than a fabricated year: an unflagged database is a
+      // real state (D-008 leaves the flag to the admin), and showing a plausible
+      // "FY2026" would hide it.
+      fiscalYearLabel={
+        (fiscalYearName ?? "未设置财年") + (isFallback ? " · 演示数据" : "")
+      }
+    />
   );
 }
