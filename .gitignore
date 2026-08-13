@@ -50,3 +50,8 @@ next-env.d.ts
 # Backup output from scripts/backup-db.mjs. The *.db line above already covers
 # the files themselves; this keeps the directory out too.
 /backups/
+
+# Lock and log for scripts/auto-commit.mjs. Must stay ignored: the script skips a
+# run when any changed file was touched recently, so its own log would keep the
+# working tree permanently "just modified" and no auto-commit would ever fire.
+/.autocommit/

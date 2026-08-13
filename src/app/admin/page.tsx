@@ -195,6 +195,13 @@ export default async function AdminPage(): Promise<ReactElement> {
             部/课的名称、以及部课的删除不在本页范围内——名称是组织数据的自然键，
             相关变更请通过 Excel 导入流程完成。
           </p>
+          {/* D-173: the audit trail's limitation has to be visible to the people
+              who rely on it - operators never read schema comments. */}
+          <p className="mt-3 max-w-2xl rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground ring-1 ring-border">
+            本页每次成功保存，都会留存一份当时的完整快照（组织结构与职位规则各自独立记录，永久保留）。
+            但本系统为内网免登录，<span className="font-medium text-warn">无法记录操作者身份</span>
+            ——快照只能回答「什么时候被改成了什么样」，不能回答「是谁改的」。
+          </p>
         </div>
       </header>
 

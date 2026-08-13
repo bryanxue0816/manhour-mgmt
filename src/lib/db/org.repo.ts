@@ -14,6 +14,7 @@
 
 import type { Department, Section } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { writeMasterDataWithAudit } from "./master-data-change-log.repo";
 import type {
   DepartmentDto,
   DepartmentPatch,
@@ -111,46 +112,97 @@ export async function loadOrgSnapshot(): Promise<OrgSnapshot> {
  * Org changes arrive as a full Excel re-upload and history is never deleted
  * (D-153), so seed and every later re-import share this single write path.
  * `name` is `@unique`, which makes it the natural key.
+ *
+ * Audited per D-173: the write and its snapshot share one transaction, so a failed
+ * snapshot rolls the write back rather than leaving the trail incomplete. The
+ * pre-read is what lets the trail say `create` or `update` truthfully - Prisma's
+ * upsert does not report which branch it took, and a re-import recorded as `create`
+ * would misdescribe an overwrite.
  */
 export async function upsertDepartment(input: DepartmentUpsertInput): Promise<DepartmentDto> {
-  const row = await prisma.department.upsert({
-    where: { name: input.name },
-    create: { ...departmentData(input), name: input.name, sortOrder: input.sortOrder },
-    update: departmentData(input),
-  });
-  return toDepartmentDto(row);
+  const written = await writeMasterDataWithAudit(
+    "organization",
+    async (tx) => {
+      const existing = await tx.department.findUnique({
+        where: { name: input.name },
+        select: { id: true },
+      });
+      const row = await tx.department.upsert({
+        where: { name: input.name },
+        create: { ...departmentData(input), name: input.name, sortOrder: input.sortOrder },
+        update: departmentData(input),
+      });
+      return { dto: toDepartmentDto(row), created: existing === null };
+    },
+    (w) => ({ action: w.created ? "create" : "update", targetKey: w.dto.name }),
+  );
+  return written.dto;
 }
 
 /**
  * Upserts a section keyed on the composite natural key (departmentId, name).
  * Section names are only unique within their department, hence the compound
  * `@@unique([departmentId, name])` key rather than `name` alone.
+ *
+ * Audited per D-173 - see {@link upsertDepartment} for why the pre-read is here.
  */
 export async function upsertSection(input: SectionUpsertInput): Promise<SectionDto> {
   const { departmentId, name, sortOrder } = input;
-  const row = await prisma.section.upsert({
-    where: { departmentId_name: { departmentId, name } },
-    create: { ...sectionData(input), departmentId, name, sortOrder },
-    update: sectionData(input),
-  });
-  return toSectionDto(row);
+  const written = await writeMasterDataWithAudit(
+    "organization",
+    async (tx) => {
+      const existing = await tx.section.findUnique({
+        where: { departmentId_name: { departmentId, name } },
+        select: { id: true },
+      });
+      const row = await tx.section.upsert({
+        where: { departmentId_name: { departmentId, name } },
+        create: { ...sectionData(input), departmentId, name, sortOrder },
+        update: sectionData(input),
+      });
+      return { dto: toSectionDto(row), created: existing === null };
+    },
+    (w) => ({ action: w.created ? "create" : "update", targetKey: w.dto.name }),
+  );
+  return written.dto;
 }
 
 /**
  * Patches a department by id, keeping the undefined/null contract above.
- * @throws if no department has this id (Prisma P2025).
+ *
+ * Audited per D-173. `targetKey` is the name from the row Prisma returns, not the
+ * id: an audit read six months later needs a human-readable key.
+ *
+ * @throws if no department has this id (Prisma P2025) - the transaction rolls back
+ *   and no snapshot is written, so the trail never claims a failed edit happened.
  */
 export async function updateDepartment(id: string, patch: DepartmentPatch): Promise<DepartmentDto> {
-  const row = await prisma.department.update({ where: { id }, data: departmentData(patch) });
-  return toDepartmentDto(row);
+  return writeMasterDataWithAudit(
+    "organization",
+    async (tx) => {
+      const row = await tx.department.update({ where: { id }, data: departmentData(patch) });
+      return toDepartmentDto(row);
+    },
+    (dto) => ({ action: "update", targetKey: dto.name }),
+  );
 }
 
 /**
  * Patches a section by id. `departmentId` and `name` are not patchable: they form
  * the natural key, so a move or rename goes through {@link upsertSection}.
- * @throws if no section has this id (Prisma P2025).
+ *
+ * Audited per D-173.
+ *
+ * @throws if no section has this id (Prisma P2025) - the transaction rolls back and
+ *   no snapshot is written.
  */
 export async function updateSection(id: string, patch: SectionPatch): Promise<SectionDto> {
-  const row = await prisma.section.update({ where: { id }, data: sectionData(patch) });
-  return toSectionDto(row);
+  return writeMasterDataWithAudit(
+    "organization",
+    async (tx) => {
+      const row = await tx.section.update({ where: { id }, data: sectionData(patch) });
+      return toSectionDto(row);
+    },
+    (dto) => ({ action: "update", targetKey: dto.name }),
+  );
 }

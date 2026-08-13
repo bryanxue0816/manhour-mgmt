@@ -362,3 +362,40 @@ model ImportLog {
   @@index([status, importedAt])
   @@map("import_log")
 }
+
+/// Snapshot-level audit for master data edited through /admin (D-173).
+///
+/// Stores the FULL post-write state of one entity class as JSON, not a per-field
+/// diff: `PlanChangeLog` cannot be reused because its before/after columns are
+/// `Float`, and org/rule edits are strings and booleans. The pre-edit state is not
+/// stored separately - the first write for an entity class emits a `baseline` row
+/// first, so the state before any edit survives exactly once instead of being
+/// duplicated on every subsequent write.
+///
+/// changedBy is ALWAYS the literal "admin" and is NOT an identity: v1 has no
+/// login, no roles, no session (D-008). The only access control is the nginx
+/// allowlist, which D-171 deliberately keeps open to the whole private range, so
+/// anyone on the intranet can edit /admin without credentials. This table answers
+/// "when was it changed to this", NOT "who changed it". The same limitation is
+/// stated on /admin itself - operators never read schema comments.
+model MasterDataChangeLog {
+  id        String   @id @default(cuid())
+  /// 'organization' | 'job_title_rule'. SQLite has no enum; the repo is the only
+  /// writer and constrains this to MASTER_DATA_ENTITIES.
+  entity    String
+  /// 'baseline' | 'create' | 'update'. No 'delete': D-172 withdrew the delete
+  /// requirement outright, and all four inbound FKs are onDelete: Restrict.
+  action    String
+  /// Section name / department name / jobTitle. Deliberately NOT a foreign key -
+  /// an audit row must outlive the row it describes, and a Restrict FK would also
+  /// make the audit table block the very deletes it is meant to record.
+  targetKey String
+  /// Complete JSON snapshot of the entity class AFTER the write.
+  snapshot  String
+  changedAt DateTime @default(now())
+  /// Always "admin"; a placeholder, not an identity. See the model docstring.
+  changedBy String   @default("admin")
+
+  @@index([entity, changedAt])
+  @@map("master_data_change_log")
+}
