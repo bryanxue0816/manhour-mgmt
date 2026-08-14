@@ -116,16 +116,19 @@ function freshDb(): FakeDb {
 let db: FakeDb;
 
 /** Applies a Prisma `select` projection, since the stored snapshot format depends on it. */
-function project<T extends Record<string, unknown>>(
+function project<T extends object>(
   row: T,
   select: Record<string, boolean> | undefined,
 ): Record<string, unknown> {
+  // The row shapes are plain interfaces, so one cast here beats an index signature on
+  // each of them - which would also stop TypeScript from catching a typo'd field.
+  const source = row as Record<string, unknown>;
   if (select === undefined) {
-    return { ...row };
+    return { ...source };
   }
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(select)) {
-    out[key] = row[key];
+    out[key] = source[key];
   }
   return out;
 }
