@@ -203,8 +203,18 @@ export async function countPlansByFiscalYear(
  */
 async function upsertPlanWithAuditTx(
   tx: Prisma.TransactionClient,
-  input: PlanUpsertInput & { changedBy: string; reason?: string | null },
+  input: PlanUpsertInput & { changedBy: string; reason: string },
 ): Promise<PlanWriteResult> {
+  if (input.reason.trim() === "") {
+    // D-174 made the reason required. Guarded here rather than only at the Server
+    // Actions, because this is the single choke point both audited paths (one cell,
+    // and the 288-row import) pass through - and an unexplained edit is refused
+    // outright, for the same reason a blank `changedBy` is (plan-change-log.repo.ts).
+    throw new Error(
+      "Invalid audited plan write: reason is required (D-174). A trail that records " +
+        "a change nobody can explain is the failure the requirement exists to prevent.",
+    );
+  }
   const key = {
     sectionId: input.sectionId,
     fiscalYearId: input.fiscalYearId,
@@ -258,12 +268,13 @@ async function upsertPlanWithAuditTx(
  * A first insert logs nothing: `created: true` with `loggedChanges: 0`. There is no
  * prior value, so a synthetic 0 -> 1045 entry would misreport an import as an edit.
  *
- * @param reason - optional justification, applied to every entry this edit produces.
+ * @param reason - required justification (D-174), applied to every entry this edit
+ *   produces. Callers pass it already trimmed; blank is refused, not normalised to null.
  * @throws if `month` is outside 1..12, or either hour value is not a finite number
- *   >= 0, or `changedBy` is blank - in every case nothing is written.
+ *   >= 0, or `changedBy` / `reason` is blank - in every case nothing is written.
  */
 export async function upsertPlanWithAudit(
-  input: PlanUpsertInput & { changedBy: string; reason?: string | null },
+  input: PlanUpsertInput & { changedBy: string; reason: string },
 ): Promise<PlanWriteResult> {
   assertPlanInput(input);
   return prisma.$transaction((tx) => upsertPlanWithAuditTx(tx, input));
@@ -301,13 +312,15 @@ export interface BulkPlanWriteResult {
  *
  * @param inputs typically 288 rows (24 sections x 12 months) for one fiscal year.
  * @param changedBy audit attribution, applied to every entry.
- * @param reason optional justification, applied to every entry.
- * @throws if any input is invalid or `changedBy` is blank - nothing is written.
+ * @param reason required justification (D-174), applied to every entry. One sentence
+ *   covers the whole upload, which is the correct grain here: the 288 rows are a single
+ *   act, unlike the per-cell edits the grid produces.
+ * @throws if any input is invalid or `changedBy` / `reason` is blank - nothing is written.
  */
 export async function upsertPlansBulkWithAudit(
   inputs: readonly PlanUpsertInput[],
   changedBy: string,
-  reason?: string | null,
+  reason: string,
 ): Promise<BulkPlanWriteResult> {
   // Validate EVERYTHING before opening the transaction - see upsertPlansBulk().
   for (const input of inputs) {

@@ -12,22 +12,38 @@
 //     new cell can only be rejected. The blur handler therefore sits on the <td> and
 //     ignores focus moves that stay inside it.
 //
-// D-143 leaves "does an edit need a confirmation dialog" open and assumes yes for v1.
-// This screen does not show one, on purpose: there is no dialog primitive in
-// components/ui, and the property a dialog protects here is reversibility, which the
-// design already provides three ways - the cell is disabled while in flight, a failed
-// write reverts the input and reports why, and every successful write is both logged
-// (D-143) and immediately re-editable. A modal on each of 288 cells would cost an
-// entry session far more than it protects. Worth revisiting if the audience widens
-// beyond the 1-2 administrators D-142 assumes.
+// D-174 closes the question D-143 left open: leaving a cell now opens a confirmation
+// dialog, and the reason is REQUIRED. This reverses what this file used to argue, and
+// the reversal is deliberate - both of the old premises turned out to be wrong:
 //
-// The reason field D-143 calls optional is collected once per session above the grid
-// rather than per cell, which is the affordance a batch entry session actually wants.
+//   * "there is no dialog primitive in components/ui" - @base-ui/react was already a
+//     dependency and already ships alert-dialog, so the cost was a wrapper, not a
+//     package. See components/ui/alert-dialog.tsx.
+//   * "a modal on each of 288 cells would cost an entry session more than it protects" -
+//     bulk entry of all 288 cells goes through /plans/import (D-142), which has its own
+//     one-shot overwrite confirmation (D-159). What reaches this grid is the post-hoc
+//     single-cell correction, and that is exactly the edit worth stopping to justify.
+//
+// The reason therefore moved from once-per-session to once-per-edit. A session-level
+// field was defensible while the reason was optional; once required, it would make 50
+// unrelated edits share one sentence, which is a worse audit trail than collecting
+// nothing. Required means required per edit, so the input lives inside the dialog.
+//
+// No exception for a first entry into an empty cell: "计划工时凭什么是这个数" is the
+// question the trail has to answer, and it is no less relevant for the first value.
 
-import { useCallback, useState, type ReactElement } from "react";
+import { useCallback, useId, useRef, useState, type ReactElement } from "react";
 import { toast } from "sonner";
 
 import { savePlanCell } from "../actions";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 import { formatHoursValue } from "@/lib/format";
 import type { PlanGrid, PlanGridCell, PlanGridRow } from "@/lib/plans/grid";
 import type { PlanField } from "@/lib/plans/validate";
@@ -45,6 +61,20 @@ interface CellDraft {
   present: boolean;
 }
 
+/**
+ * An edit that has left its cell and is waiting for the operator to confirm it (D-174).
+ *
+ * The draft is captured here by value at blur time for the same reason the cell passes
+ * it down: state read later in the closure would be stale, and the dialog must show and
+ * write exactly the numbers the operator walked away from.
+ */
+interface PendingEdit {
+  key: string;
+  row: PlanGridRow;
+  cell: PlanGridCell;
+  submitted: CellDraft;
+}
+
 const REASON_MAX_LENGTH = 200;
 
 function cellKey(sectionId: string, month: number): string {
@@ -60,6 +90,16 @@ function cellKey(sectionId: string, month: number): string {
  */
 function toRaw(value: number, present: boolean): string {
   return present ? String(value) : "";
+}
+
+/**
+ * Renders one side of the old -> new comparison in the confirmation dialog.
+ *
+ * A blank stands for an absent cell, and "0" would misreport it as a stored zero.
+ */
+function toComparison(raw: string): string {
+  const trimmed = raw.trim();
+  return trimmed === "" ? "(空)" : trimmed;
 }
 
 /** Numeric view of a draft input, or null when it is blank or not a number. */
@@ -187,6 +227,32 @@ function GridCell({
   );
 }
 
+/** One row of the old -> new comparison shown before the write. */
+function ComparisonRow({
+  label,
+  before,
+  after,
+  tone,
+}: {
+  label: string;
+  before: string;
+  after: string;
+  tone: string;
+}): ReactElement {
+  return (
+    <div className="flex items-baseline justify-between gap-4">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="tabular-nums">
+        <span className="text-muted-foreground">{toComparison(before)}</span>
+        <span className="mx-1.5 text-muted-foreground" aria-hidden="true">
+          →
+        </span>
+        <span className={`font-medium ${tone}`}>{toComparison(after)}</span>
+      </dd>
+    </div>
+  );
+}
+
 export function PlanGridEditor({
   grid,
   fiscalYearId,
@@ -195,7 +261,12 @@ export function PlanGridEditor({
   fiscalYearId: string;
 }): ReactElement {
   const [drafts, setDrafts] = useState<Record<string, CellDraft>>({});
+  const [pending, setPending] = useState<PendingEdit | null>(null);
   const [reason, setReason] = useState("");
+  const [reasonMissing, setReasonMissing] = useState(false);
+  const reasonRef = useRef<HTMLTextAreaElement>(null);
+  const reasonFieldId = useId();
+  const reasonErrorId = useId();
 
   /**
    * Ensures a draft exists for a cell and applies `mutate` to it.
@@ -246,8 +317,14 @@ export function PlanGridEditor({
     [patch],
   );
 
-  const handleCommit = useCallback(
-    async (
+  /**
+   * Leaving a changed cell asks for confirmation instead of writing (D-174).
+   *
+   * Unchanged cells never open the dialog: tabbing across a row the operator is only
+   * reading must stay free, and there is nothing to justify.
+   */
+  const requestCommit = useCallback(
+    (
       key: string,
       row: PlanGridRow,
       cell: PlanGridCell,
@@ -255,7 +332,7 @@ export function PlanGridEditor({
       // a keystroke re-renders before the blur fires, so the prop is current, and
       // reading state here would need a ref to escape the closure.
       submitted: CellDraft | undefined,
-    ): Promise<void> => {
+    ): void => {
       if (submitted === undefined || submitted.status === "saving") {
         // Untouched cell, or a write already in flight. Nothing to do either way.
         return;
@@ -270,51 +347,60 @@ export function PlanGridEditor({
         }
         return;
       }
-
-      patch(key, cell, (draft) => ({ ...draft, status: "saving", fieldErrors: {} }));
-
-      const result = await savePlanCell({
-        sectionId: row.sectionId,
-        fiscalYearId,
-        month: cell.month,
-        plannedRaw: submitted.plannedRaw,
-        challengeRaw: submitted.challengeRaw,
-        reason: reason.trim() === "" ? null : reason.trim(),
-      });
-
-      if (result.ok) {
-        setDrafts((previous) => {
-          const draft = previous[key];
-          if (draft === undefined) {
-            return previous;
-          }
-          return {
-            ...previous,
-            [key]: {
-              ...draft,
-              committedPlanned: submitted.plannedRaw,
-              committedChallenge: submitted.challengeRaw,
-              status: "idle",
-              fieldErrors: {},
-              present: true,
-            },
-          };
-        });
-        const label = `${row.sectionName} ${cell.label}`;
-        if (result.loggedChanges === 0 && result.updated) {
-          toast.info(`${label} 数值未变化,未记录修改`);
-        } else {
-          toast.success(
-            `${label} 已保存 计划 ${formatHoursValue(result.plannedHours)} / 挑战 ${formatHoursValue(
-              result.challengeHours,
-            )}`,
-            result.inverted ? { description: "挑战高于计划,按 D-151 原样保留。" } : undefined,
-          );
-        }
+      if (pending !== null) {
+        // The dialog itself takes focus, which blurs whatever cell the operator had
+        // just clicked into. That cell is unchanged and returns above; this guard is
+        // for the remaining case, so an in-flight question is never replaced silently.
         return;
       }
+      setPending({ key, row, cell, submitted });
+      setReason("");
+      setReasonMissing(false);
+    },
+    [patch, pending],
+  );
 
-      const correctable = Object.keys(result.fieldErrors).length > 0;
+  /** Declining the write puts the cell back to what the database holds. */
+  const cancelCommit = useCallback((): void => {
+    if (pending === null) {
+      return;
+    }
+    handleRevert(pending.key, pending.cell);
+    setPending(null);
+    setReason("");
+    setReasonMissing(false);
+  }, [handleRevert, pending]);
+
+  const confirmCommit = useCallback(async (): Promise<void> => {
+    if (pending === null) {
+      return;
+    }
+    const trimmedReason = reason.trim();
+    if (trimmedReason === "") {
+      // The button stays enabled rather than disabled: a disabled control announces
+      // nothing about why, and the server rejects this case anyway (plans/actions.ts).
+      setReasonMissing(true);
+      reasonRef.current?.focus();
+      return;
+    }
+
+    const { key, row, cell, submitted } = pending;
+    setPending(null);
+    setReason("");
+    setReasonMissing(false);
+
+    patch(key, cell, (draft) => ({ ...draft, status: "saving", fieldErrors: {} }));
+
+    const result = await savePlanCell({
+      sectionId: row.sectionId,
+      fiscalYearId,
+      month: cell.month,
+      plannedRaw: submitted.plannedRaw,
+      challengeRaw: submitted.challengeRaw,
+      reason: trimmedReason,
+    });
+
+    if (result.ok) {
       setDrafts((previous) => {
         const draft = previous[key];
         if (draft === undefined) {
@@ -324,46 +410,58 @@ export function PlanGridEditor({
           ...previous,
           [key]: {
             ...draft,
-            // A correctable input keeps what was typed - discarding it would make the
-            // operator retype to see the same complaint. A failed write reverts,
-            // because leaving a value on screen that is not in the database is worse.
-            plannedRaw: correctable ? draft.plannedRaw : draft.committedPlanned,
-            challengeRaw: correctable ? draft.challengeRaw : draft.committedChallenge,
-            status: "error",
-            fieldErrors: result.fieldErrors,
+            committedPlanned: submitted.plannedRaw,
+            committedChallenge: submitted.challengeRaw,
+            status: "idle",
+            fieldErrors: {},
+            present: true,
           },
         };
       });
-      toast.error(`${row.sectionName} ${cell.label}: ${result.message}`);
-    },
-    [fiscalYearId, patch, reason],
-  );
+      const label = `${row.sectionName} ${cell.label}`;
+      if (result.loggedChanges === 0 && result.updated) {
+        toast.info(`${label} 数值未变化,未记录修改`);
+      } else {
+        toast.success(
+          `${label} 已保存 计划 ${formatHoursValue(result.plannedHours)} / 挑战 ${formatHoursValue(
+            result.challengeHours,
+          )}`,
+          result.inverted ? { description: "挑战高于计划,按 D-151 原样保留。" } : undefined,
+        );
+      }
+      return;
+    }
+
+    const correctable = Object.keys(result.fieldErrors).length > 0;
+    setDrafts((previous) => {
+      const draft = previous[key];
+      if (draft === undefined) {
+        return previous;
+      }
+      return {
+        ...previous,
+        [key]: {
+          ...draft,
+          // A correctable input keeps what was typed - discarding it would make the
+          // operator retype to see the same complaint. A failed write reverts,
+          // because leaving a value on screen that is not in the database is worse.
+          plannedRaw: correctable ? draft.plannedRaw : draft.committedPlanned,
+          challengeRaw: correctable ? draft.challengeRaw : draft.committedChallenge,
+          status: "error",
+          fieldErrors: result.fieldErrors,
+        },
+      };
+    });
+    toast.error(`${row.sectionName} ${cell.label}: ${result.message}`);
+  }, [fiscalYearId, patch, pending, reason]);
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2 rounded-lg bg-card px-4 py-3 ring-1 ring-border">
-        <label
-          htmlFor="plan-edit-reason"
-          className="text-xs font-medium whitespace-nowrap text-muted-foreground"
-        >
-          修改原因(可选)
-        </label>
-        <input
-          id="plan-edit-reason"
-          type="text"
-          value={reason}
-          maxLength={REASON_MAX_LENGTH}
-          placeholder="例如:年中预算调整。填写后本次会话内的每次修改都会记入留痕。"
-          className="min-w-0 flex-1 rounded border border-border bg-transparent px-2 py-1 text-sm focus:border-plan focus:outline-none focus:ring-2 focus:ring-plan/30"
-          onChange={(event) => setReason(event.target.value)}
-        />
-      </div>
-
       <div className="overflow-x-auto rounded-lg bg-card ring-1 ring-border">
         <table className="w-full border-collapse text-sm">
           <caption className="sr-only">
             各课分月计划工时与挑战工时,可直接编辑。每格上行为计划工时,下行为挑战工时,单位小时。
-            离开格子即保存,按 Esc 撤销未保存的输入。
+            离开格子后会弹出确认框,填写修改原因并确认才会保存;按 Esc 撤销未保存的输入。
           </caption>
           <thead>
             <tr className="border-b border-border bg-muted/40">
@@ -414,7 +512,7 @@ export function PlanGridEditor({
                       cell={cell}
                       draft={draft}
                       onEdit={(field, value) => handleEdit(key, cell, field, value)}
-                      onCommit={() => void handleCommit(key, row, cell, draft)}
+                      onCommit={() => requestCommit(key, row, cell, draft)}
                       onRevert={() => handleRevert(key, cell)}
                     />
                   );
@@ -434,6 +532,82 @@ export function PlanGridEditor({
           </tbody>
         </table>
       </div>
+
+      {pending === null ? null : (
+        <AlertDialog
+          open
+          onOpenChange={(open) => {
+            // Escape is the only route to false here - neither button is a Close part -
+            // and it means the same as 取消, matching Escape inside a cell.
+            if (!open) {
+              cancelCommit();
+            }
+          }}
+        >
+          <AlertDialogContent initialFocus={reasonRef}>
+            <AlertDialogTitle>确认修改计划工时</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pending.row.sectionName} · {pending.cell.label}
+            </AlertDialogDescription>
+
+            <dl className="mt-3 space-y-1 rounded-md bg-muted/40 px-3 py-2 text-sm">
+              <ComparisonRow
+                label="计划工时"
+                before={pending.submitted.committedPlanned}
+                after={pending.submitted.plannedRaw}
+                tone="text-plan"
+              />
+              <ComparisonRow
+                label="挑战工时"
+                before={pending.submitted.committedChallenge}
+                after={pending.submitted.challengeRaw}
+                tone="text-challenge"
+              />
+            </dl>
+
+            <div className="mt-4 space-y-1.5">
+              <label htmlFor={reasonFieldId} className="block text-sm font-medium">
+                修改原因(必填,记入修改履历)
+              </label>
+              <textarea
+                id={reasonFieldId}
+                ref={reasonRef}
+                rows={3}
+                value={reason}
+                maxLength={REASON_MAX_LENGTH}
+                aria-invalid={reasonMissing}
+                aria-describedby={reasonMissing ? reasonErrorId : undefined}
+                placeholder="例如:年中预算调整,追加 A 线增产工时。"
+                className={`w-full resize-y rounded border bg-transparent px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-plan/30 ${
+                  reasonMissing ? "border-warn" : "border-border focus:border-plan"
+                }`}
+                onChange={(event) => {
+                  setReason(event.target.value);
+                  if (reasonMissing && event.target.value.trim() !== "") {
+                    setReasonMissing(false);
+                  }
+                }}
+              />
+              {reasonMissing ? (
+                <p id={reasonErrorId} role="alert" className="text-xs text-warn">
+                  请填写修改原因后再确认。
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  最长 {REASON_MAX_LENGTH} 字,会随本次修改一并写入履历。
+                </p>
+              )}
+            </div>
+
+            <AlertDialogFooter>
+              <Button variant="outline" onClick={cancelCommit}>
+                取消
+              </Button>
+              <Button onClick={() => void confirmCommit()}>确认保存</Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
     </div>
   );
 }

@@ -179,13 +179,16 @@ export function PlanImportForm({
   defaultFiscalYearId: string;
 }): ReactElement {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const reasonInputRef = useRef<HTMLInputElement>(null);
   const fileFieldId = useId();
   const yearFieldId = useId();
   const reasonFieldId = useId();
+  const reasonErrorId = useId();
 
   const [fiscalYearId, setFiscalYearId] = useState(defaultFiscalYearId);
   const [file, setFile] = useState<File | null>(null);
   const [reason, setReason] = useState("");
+  const [reasonMissing, setReasonMissing] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
   const [busy, setBusy] = useState<"idle" | "preview" | "commit">("idle");
   const [preview, setPreview] = useState<PlanImportPreview | null>(null);
@@ -226,9 +229,9 @@ export function PlanImportForm({
     const formData = new FormData();
     formData.set("fiscalYearId", fiscalYearId);
     formData.set("file", file);
-    if (reason.trim() !== "") {
-      formData.set("reason", reason.trim());
-    }
+    // Always set, even when blank: the commit action decides whether an empty reason is
+    // acceptable, and omitting the key would let a stale build look like a stale server.
+    formData.set("reason", reason.trim());
     return formData;
   }, [file, fiscalYearId, reason]);
 
@@ -268,6 +271,14 @@ export function PlanImportForm({
       setError({ message: "请先完成校验预览。", problems: [] });
       return;
     }
+    if (reason.trim() === "") {
+      // D-174 makes this required. Checked here rather than at preview time, because a
+      // preview writes nothing and logs nothing - there is not yet a change to justify.
+      setReasonMissing(true);
+      setError({ message: "请填写导入说明后再导入。", problems: [] });
+      reasonInputRef.current?.focus();
+      return;
+    }
     if (confirmOverwrite) {
       formData.set("confirmOverwrite", "yes");
     }
@@ -279,6 +290,8 @@ export function PlanImportForm({
         setSummary(result.summary);
         setPreview(null);
         setFile(null);
+        setReason("");
+        setReasonMissing(false);
         setConfirmOverwrite(false);
         if (fileInputRef.current !== null) {
           fileInputRef.current.value = "";
@@ -296,7 +309,7 @@ export function PlanImportForm({
     } finally {
       setBusy("idle");
     }
-  }, [buildFormData, confirmOverwrite, preview]);
+  }, [buildFormData, confirmOverwrite, preview, reason]);
 
   const overwriteBlocked =
     preview !== null && preview.existingRowCount > 0 && !confirmOverwrite;
@@ -352,20 +365,38 @@ export function PlanImportForm({
 
         <div className="space-y-1.5">
           <label htmlFor={reasonFieldId} className="block text-sm font-medium">
-            导入说明(可选,记入修改履历)
+            导入说明(必填,记入修改履历)
           </label>
           <input
             id={reasonFieldId}
+            ref={reasonInputRef}
             type="text"
             value={reason}
             maxLength={REASON_MAX_LENGTH}
             disabled={busy !== "idle"}
+            required
+            aria-invalid={reasonMissing}
+            aria-describedby={reasonMissing ? reasonErrorId : undefined}
             onChange={(event) => {
               setReason(event.target.value);
+              if (reasonMissing && event.target.value.trim() !== "") {
+                setReasonMissing(false);
+              }
             }}
             placeholder="例如:年度预算下发第 2 版"
-            className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+            className={`w-full rounded-md border bg-background px-3 py-2 text-sm ${
+              reasonMissing ? "border-warn" : "border-border"
+            }`}
           />
+          {reasonMissing ? (
+            <p id={reasonErrorId} role="alert" className="text-xs text-warn">
+              请填写导入说明后再导入。
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              校验预览不需要填写,正式导入前必须填写,会写入每条修改履历。
+            </p>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-3">

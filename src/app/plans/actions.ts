@@ -43,7 +43,7 @@ import {
  */
 const PLAN_EDITOR = "admin";
 
-/** Guards the optional free-text reason against an unbounded write. */
+/** Guards the required free-text reason against an unbounded write. */
 const REASON_MAX_LENGTH = 200;
 
 /** The two editable quantities, in display order. */
@@ -57,8 +57,14 @@ export interface SavePlanCellInput {
   /** Exactly what the administrator typed - see the module note. */
   plannedRaw: string;
   challengeRaw: string;
-  /** Optional justification, stored on every audit entry this edit produces (D-143). */
-  reason?: string | null;
+  /**
+   * Required justification, stored on every audit entry this edit produces (D-143).
+   *
+   * Required as of D-174, and enforced in checkShape() rather than only in the dialog:
+   * a Server Action is a public HTTP endpoint, so a client-side `required` is a hint to
+   * the operator, not a guarantee to the audit trail.
+   */
+  reason: string;
 }
 
 export type SavePlanCellResult =
@@ -115,13 +121,17 @@ function checkShape(input: SavePlanCellInput): string | null {
   if (typeof input.plannedRaw !== "string" || typeof input.challengeRaw !== "string") {
     return "输入格式不合法,请刷新页面后重试。";
   }
-  if (input.reason !== undefined && input.reason !== null) {
-    if (typeof input.reason !== "string") {
-      return "修改原因格式不合法。";
-    }
-    if (input.reason.length > REASON_MAX_LENGTH) {
-      return `修改原因最长 ${REASON_MAX_LENGTH} 字。`;
-    }
+  if (typeof input.reason !== "string") {
+    return "修改原因格式不合法。";
+  }
+  if (input.reason.trim() === "") {
+    // D-174: an edit without a stated reason is refused outright. Writing the row and
+    // logging an empty reason would leave a trail that records a change nobody can
+    // explain, which is the exact failure the requirement exists to prevent.
+    return "请填写修改原因后再保存。";
+  }
+  if (input.reason.length > REASON_MAX_LENGTH) {
+    return `修改原因最长 ${REASON_MAX_LENGTH} 字。`;
   }
   return null;
 }
@@ -193,10 +203,8 @@ export async function savePlanCell(
     return reject("请修正标红的输入后重试。", toFieldErrors(cellErrors));
   }
 
-  const reason =
-    typeof input.reason === "string" && input.reason.trim() !== ""
-      ? input.reason.trim()
-      : null;
+  // Non-empty by checkShape(); trimmed so trailing whitespace never reaches the log.
+  const reason = input.reason.trim();
 
   let written: Awaited<ReturnType<typeof upsertPlanWithAudit>>;
   try {

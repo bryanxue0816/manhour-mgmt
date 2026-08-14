@@ -56,7 +56,7 @@ const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 /** ZIP local-file-header signature - `.xlsx` is a ZIP container. */
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04] as const;
 
-/** Guards the optional free-text reason against an unbounded write. */
+/** Guards the required free-text reason against an unbounded write. */
 const REASON_MAX_LENGTH = 200;
 
 /** One section's numbers as the preview table renders them. */
@@ -165,12 +165,21 @@ async function readUpload(
   return { ok: true, buffer };
 }
 
-/** Reads and bounds the optional reason field shared by both steps. */
+/**
+ * Reads and bounds the import reason, which D-174 makes REQUIRED.
+ *
+ * Only the commit step calls this. The preview writes nothing and produces no audit
+ * entry, so demanding a justification before the operator has even seen what the file
+ * contains would ask them to explain a change they cannot yet inspect.
+ *
+ * Enforced here rather than only by the form: a Server Action is a public HTTP endpoint,
+ * so an omitted field must be refused by the server, not merely discouraged in the UI.
+ */
 function readReason(
   raw: unknown,
-): { ok: true; reason: string | null } | { ok: false; message: string } {
+): { ok: true; reason: string } | { ok: false; message: string } {
   if (typeof raw !== "string" || raw.trim() === "") {
-    return { ok: true, reason: null };
+    return { ok: false, message: "请填写导入说明后再导入。" };
   }
   const reason = raw.trim();
   if (reason.length > REASON_MAX_LENGTH) {
@@ -303,7 +312,9 @@ export async function commitPlanImport(
     written = await upsertPlansBulkWithAudit(
       matched.matched.rows,
       IMPORT_ACTOR,
-      reasonResult.reason ?? `Excel 批量导入(${fiscalYear.name})`,
+      // No synthesised fallback: a generated string like "Excel 批量导入" would fill the
+      // column while telling a later reader nothing D-174 asked for.
+      reasonResult.reason,
     );
   } catch (error) {
     console.error(
