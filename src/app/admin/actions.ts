@@ -1,8 +1,8 @@
 // Server Actions for the master-data admin page (Phase 5 task 4).
 //
-// Three writes: job-title rules (D-109/D-156), and the editable columns of the
-// department / section tree. Every one follows the two boundary rules established by
-// src/app/plans/actions.ts:
+// Write surfaces: job-title rules (D-109/D-156), the editable columns of the
+// department / section tree, and section rename (D-179). Every one follows the two
+// boundary rules established by src/app/plans/actions.ts:
 //
 //   1. Actions take RAW STRINGS, never numbers. `sortOrder` arrives as whatever the
 //      administrator typed, so "1.5" and "abc" can be reported differently instead of
