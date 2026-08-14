@@ -15,15 +15,26 @@
 // Server Actions are public HTTP endpoints - the browser is not a trust boundary - so
 // payload shape is validated here rather than trusted from the TypeScript types.
 //
-// SCOPE, deliberately narrow (batch 1):
+// SCOPE:
 //
-//   - No renaming. `DepartmentPatch` / `SectionPatch` exclude `name` by design,
-//     because org.repo.ts writes sections on the natural key (departmentId, name):
-//     a row renamed here would no longer match its spelling in the next Excel
-//     re-import, and upsertSection() would CREATE A SECOND SECTION rather than update
-//     this one - splitting that section's plans and actuals across two ids with no
-//     error anywhere. A safe rename has to write a SectionAlias in the same
-//     transaction, which is its own piece of work.
+//   - Section rename is supported, and ONLY through renameSectionWithAlias(): the
+//     rename and the SectionAlias that keeps historical attendance attached share one
+//     transaction. `SectionPatch` still excludes `name` so no other path can rename a
+//     row without that alias - see the repo function for why a bare rename loses
+//     history silently.
+//
+//   - Department rename is NOT supported. buildSectionIndex() keys sections on
+//     aliasKey(部名, 课名), so the department name is part of every section's lookup
+//     key: renaming one department breaks the historical match for ALL of its sections
+//     at once, and compensating needs one alias per section rather than one. Its own
+//     piece of work, by blast radius.
+//
+//   - Re-running `npm run db:seed` after a rename WILL re-create the old spelling as a
+//     second section: the seed hardcodes the original name and writes through
+//     upsertSection() on the natural key (departmentId, name). No alias can prevent
+//     that, because the seed's write is legitimate on its own terms. There is no org
+//     Excel import route in the app - the seed is the only re-import path - so the
+//     mitigation is to update prisma/seed.ts when a rename is meant to be permanent.
 //
 //   - No deletion. Section is referenced with onDelete: Restrict by Plan, Actual,
 //     SectionAlias and AttendanceRaw, so deleting a populated one throws a raw
@@ -36,7 +47,13 @@ import { revalidatePath } from "next/cache";
 
 import { Prisma } from "@/generated/prisma/client";
 import { createJobTitleRule, upsertJobTitleRule } from "@/lib/db/job-title-rule.repo";
-import { updateDepartment, updateSection, upsertSection } from "@/lib/db/org.repo";
+import {
+  SectionRenameError,
+  renameSectionWithAlias,
+  updateDepartment,
+  updateSection,
+  upsertSection,
+} from "@/lib/db/org.repo";
 
 /** Guards the free-text remark against an unbounded write. */
 const REMARK_MAX_LENGTH = 200;
@@ -416,7 +433,7 @@ export interface SaveSectionInput {
   managerEmailRaw?: string | null;
 }
 
-/** Updates one section's editable columns. `name` is not patchable - see SCOPE. */
+/** Updates one section's editable columns. Renaming goes through renameSection(). */
 export async function saveSection(
   input: SaveSectionInput,
 ): Promise<AdminActionResult<SectionField>> {
@@ -461,6 +478,77 @@ export async function saveSection(
   }
 
   revalidateAdmin("saveSection");
+  return { ok: true };
+}
+
+export interface RenameSectionInput {
+  id: string;
+  /** New 课 name, exactly as typed. Compared verbatim - no normalisation (aliasKey). */
+  nameRaw: string;
+}
+
+/**
+ * Renames one section, leaving an alias so historical attendance still resolves.
+ *
+ * Separate from saveSection() rather than another field on it, for two reasons. A
+ * rename is not a column edit: it writes a second row (the alias) and can be refused
+ * for reasons the other columns cannot produce, so folding it in would make one
+ * "保存" mean two different transactions. And the editor asks for confirmation before
+ * a rename but not before a sortOrder tweak, which needs two call sites anyway.
+ *
+ * Renaming to the current name is accepted and writes nothing - see the repository.
+ */
+export async function renameSection(
+  input: RenameSectionInput,
+): Promise<AdminActionResult<SectionField>> {
+  if (typeof input?.id !== "string" || input.id.trim() === "") {
+    return reject("缺少课标识,请刷新页面后重试。");
+  }
+
+  const name = parseRequiredText(input.nameRaw, "课名称", 50);
+  if ("error" in name) {
+    return reject("请修正标红的输入后重试。", { name: name.error });
+  }
+
+  try {
+    await renameSectionWithAlias(input.id, name.value);
+  } catch (error) {
+    if (error instanceof SectionRenameError) {
+      switch (error.reason) {
+        case "not-found":
+          return reject("该课已不存在,请刷新页面后重试。");
+        case "name-taken":
+          return reject("请修正标红的输入后重试。", {
+            name: `本部门下已有「${name.value}」,请换一个名称。`,
+          });
+        case "alias-conflict":
+          // Not overwritten on purpose: that alias is someone's deliberate mapping,
+          // and re-pointing it would move ANOTHER section's history.
+          return reject("请修正标红的输入后重试。", {
+            name: "原课名已被别名指向其他课,改名会覆盖该映射。请先处理该别名后重试。",
+          });
+        case "alias-shadow":
+          return reject("请修正标红的输入后重试。", {
+            name: `「${name.value}」已是其他课的别名,改成它会把那个课的历史考勤并过来。`,
+          });
+      }
+    }
+    // Backstops for the same two conditions arriving as constraint violations - a
+    // concurrent write can slip between the repository's check and its update.
+    const failed = prismaErrorCode(error);
+    if (failed === UNIQUE_VIOLATION) {
+      return reject("请修正标红的输入后重试。", {
+        name: `本部门下已有「${name.value}」,请换一个名称。`,
+      });
+    }
+    if (failed === RECORD_NOT_FOUND) {
+      return reject("该课已不存在,请刷新页面后重试。");
+    }
+    console.error(`[renameSection] failed for id=${input.id} name=${name.value}`, error);
+    return reject("改名失败,数据未写入。请重试;若持续失败请联系管理员。");
+  }
+
+  revalidateAdmin("renameSection");
   return { ok: true };
 }
 

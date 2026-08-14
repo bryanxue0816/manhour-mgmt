@@ -14,7 +14,12 @@
 
 import type { Department, Section } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
-import { writeMasterDataWithAudit } from "./master-data-change-log.repo";
+import {
+  ensureMasterDataBaseline,
+  recordMasterDataSnapshot,
+  writeMasterDataWithAudit,
+} from "./master-data-change-log.repo";
+import { aliasKey } from "./section-key";
 import type {
   DepartmentDto,
   DepartmentPatch,
@@ -188,8 +193,9 @@ export async function updateDepartment(id: string, patch: DepartmentPatch): Prom
 }
 
 /**
- * Patches a section by id. `departmentId` and `name` are not patchable: they form
- * the natural key, so a move or rename goes through {@link upsertSection}.
+ * Patches a section by id. `departmentId` and `name` are not patchable here: they
+ * form the natural key, so a move goes through {@link upsertSection} and a rename
+ * through {@link renameSectionWithAlias}, which has to write an alias alongside it.
  *
  * Audited per D-173.
  *
@@ -205,4 +211,137 @@ export async function updateSection(id: string, patch: SectionPatch): Promise<Se
     },
     (dto) => ({ action: "update", targetKey: dto.name }),
   );
+}
+
+/** Why a rename was refused. Each value maps to one message at the action layer. */
+export type SectionRenameFailure =
+  | "not-found"
+  | "name-taken"
+  | "alias-conflict"
+  | "alias-shadow";
+
+/**
+ * A rename the repository refuses, as opposed to a bug.
+ *
+ * Thrown rather than returned so the happy path keeps the `Promise<SectionDto>` shape
+ * of its siblings, and carries `reason` because the four refusals need four different
+ * things from the operator - the message alone would force the caller to match on
+ * text.
+ */
+export class SectionRenameError extends Error {
+  readonly reason: SectionRenameFailure;
+
+  constructor(reason: SectionRenameFailure, message: string) {
+    super(message);
+    this.name = "SectionRenameError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Renames a section and leaves an alias behind so historical attendance keeps
+ * resolving to it.
+ *
+ * Why this cannot be a plain `update`: resolveSectionId() in lib/attendance/calc.ts
+ * looks a row up by `aliasKey(部名, 课名)` against an index built from the CURRENT
+ * section names, falls back to the alias table, and returns `null` on a double miss.
+ * `null` is a warning, never a rejection (D-164), so a bare rename would send every
+ * historical HR row carrying the old spelling into the 未归属 bucket - silently, with
+ * no error anywhere. The alias written here is what keeps them attached.
+ *
+ * All four writes - name, alias, baseline, snapshot - share one transaction. Half
+ * success is the failure mode that matters: a committed rename without its alias
+ * moves historical hours without saying so.
+ *
+ * Renaming back to a previous name is safe and needs no cleanup: the old alias then
+ * points at the same section the live name resolves to, so both paths agree.
+ *
+ * @param newName - already trimmed and validated by the caller. Compared verbatim,
+ *   like every other section key (see aliasKey's note on normalisation).
+ * @returns the section after the rename; unchanged, with nothing written, when
+ *   `newName` already equals the stored name.
+ * @throws {SectionRenameError} on any of the four refusals.
+ */
+export async function renameSectionWithAlias(id: string, newName: string): Promise<SectionDto> {
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.section.findUnique({
+      where: { id },
+      include: { department: { select: { name: true } } },
+    });
+    if (current === null) {
+      throw new SectionRenameError("not-found", `No section has id ${JSON.stringify(id)}.`);
+    }
+    const oldName = current.name;
+    const deptName = current.department.name;
+
+    // Idempotent, and deliberately BEFORE the baseline: a no-op that still appended a
+    // snapshot would put an edit in the trail that never happened.
+    if (oldName === newName) {
+      return toSectionDto(current);
+    }
+
+    // Checked here rather than left to the unique constraint so the caller gets a
+    // reason instead of a P2002 it has to decode.
+    const taken = await tx.section.findUnique({
+      where: { departmentId_name: { departmentId: current.departmentId, name: newName } },
+      select: { id: true },
+    });
+    if (taken !== null) {
+      throw new SectionRenameError(
+        "name-taken",
+        `Department ${JSON.stringify(deptName)} already has a section named ` +
+          `${JSON.stringify(newName)}.`,
+      );
+    }
+
+    // An alias on the OLD spelling that points somewhere else is a deliberate human
+    // mapping, and this rename would have to overwrite it to keep its own history.
+    // Refusing is the lesser harm: re-pointing it moves another section's historical
+    // hours with nothing on screen to say so.
+    const aliasOnOldName = await tx.sectionAlias.findUnique({
+      where: { hrDeptName_hrSectionName: { hrDeptName: deptName, hrSectionName: oldName } },
+      select: { sectionId: true },
+    });
+    if (aliasOnOldName !== null && aliasOnOldName.sectionId !== id) {
+      throw new SectionRenameError(
+        "alias-conflict",
+        `${JSON.stringify(aliasKey(deptName, oldName))} is already mapped to another ` +
+          "section. Re-point or remove that alias first.",
+      );
+    }
+
+    // The mirror image: resolveSectionId() consults the live name index BEFORE the
+    // alias table, so taking a name that an alias already claims would make this
+    // section shadow it and quietly absorb the other one's rows.
+    const aliasOnNewName = await tx.sectionAlias.findUnique({
+      where: { hrDeptName_hrSectionName: { hrDeptName: deptName, hrSectionName: newName } },
+      select: { sectionId: true },
+    });
+    if (aliasOnNewName !== null && aliasOnNewName.sectionId !== id) {
+      throw new SectionRenameError(
+        "alias-shadow",
+        `${JSON.stringify(aliasKey(deptName, newName))} is an alias of another section. ` +
+          "Renaming to it would take that section's historical rows.",
+      );
+    }
+
+    await ensureMasterDataBaseline(tx, "organization");
+    const row = await tx.section.update({ where: { id }, data: { name: newName } });
+    if (aliasOnOldName === null) {
+      await tx.sectionAlias.create({
+        data: {
+          hrDeptName: deptName,
+          hrSectionName: oldName,
+          sectionId: id,
+          remark: `Rename trail: "${oldName}" -> "${newName}".`,
+        },
+      });
+    }
+    await recordMasterDataSnapshot(tx, {
+      entity: "organization",
+      action: "update",
+      targetKey: row.name,
+    });
+    return toSectionDto(row);
+  });
 }
