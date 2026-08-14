@@ -10,15 +10,21 @@
 // Commit model: one explicit 保存 button per row, matching JobTitleRuleEditor. A row
 // here is four fields, so committing on blur would fire up to four writes for one edit.
 //
+// Renaming a 课 is a SEPARATE commit from that row's 保存 button, on its own 改名
+// button behind a confirmation dialog. Not folded into 保存 because a rename is not a
+// column edit: renameSection() writes a SectionAlias alongside the new name so
+// historical attendance keeps resolving, and it can be refused for reasons the other
+// columns cannot produce. One 保存 meaning two different transactions would hide that.
+//
 // SCOPE - what is deliberately NOT editable here, and why:
 //
-//   - `name` on a stored row. org.repo.ts writes sections on the natural key
-//     (departmentId, name), so a section renamed here would no longer match its
-//     spelling in the next Excel re-import: upsertSection() would CREATE A SECOND
-//     SECTION instead of updating this one, splitting that section's plans and actuals
-//     across two ids with no error anywhere. `DepartmentPatch` / `SectionPatch` omit
-//     `name` for exactly this reason. A safe rename has to write a SectionAlias in the
-//     same transaction, which is separate work.
+//   - `name` on a DEPARTMENT. buildSectionIndex() keys sections on aliasKey(部名, 课名),
+//     so the department name is part of every section's lookup key: renaming one
+//     department breaks the historical match for ALL of its sections at once, and
+//     compensating needs one alias per section rather than one. Its own work, by blast
+//     radius. `DepartmentPatch` omits `name` for that reason; `SectionPatch` omits it
+//     too, so that renameSectionWithAlias() stays the only path that can rename a
+//     section - see that function for why a bare rename loses history silently.
 //
 //   - Deletion. Section is referenced with onDelete: Restrict by Plan, Actual,
 //     SectionAlias and AttendanceRaw, so deleting a populated one surfaces a raw
@@ -29,8 +35,8 @@
 //     here with no sections under it would render an empty branch that the import
 //     cannot fill until the department name appears in a sheet anyway.
 //
-// So: sortOrder / 责任者 / 邮箱 on every row, `code` on departments, plus adding a
-// section under an existing department.
+// So: sortOrder / 责任者 / 邮箱 on every row, `code` on departments, the 课 name behind
+// 改名, plus adding a section under an existing department.
 
 import { useCallback, useState, type ReactElement } from "react";
 import { toast } from "sonner";
@@ -38,11 +44,19 @@ import { toast } from "sonner";
 import { findOrphanSections, groupByDepartment } from "./org-grouping";
 import {
   createSection,
+  renameSection,
   saveDepartment,
   saveSection,
   type DepartmentField,
   type SectionField,
 } from "../actions";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { DepartmentDto, SectionDto } from "@/lib/db/types";
@@ -65,6 +79,20 @@ interface RowDraft {
 
 interface NewSectionDraft extends RowDraft {
   name: string;
+}
+
+/**
+ * The rename awaiting confirmation, or in flight.
+ *
+ * Kept outside `RowDraft` because a rename is not one of that shape's fields: it is a
+ * separate transaction, only ever applies to a 課, and has to survive the dialog being
+ * open while the row underneath it stays otherwise editable.
+ */
+interface PendingRename {
+  section: SectionDto;
+  /** Already trimmed - what the dialog shows and what gets submitted. */
+  nextName: string;
+  status: "confirming" | "saving";
 }
 
 /**
@@ -197,6 +225,11 @@ export function OrgEditor({
   const orphans = findOrphanSections(departments, sections);
 
   const [drafts, setDrafts] = useState<Record<string, RowDraft>>({});
+  /** Section id -> 课名 being typed. Absent means untouched, so the row reads props. */
+  const [nameDrafts, setNameDrafts] = useState<Record<string, string>>({});
+  /** Section id -> why its last rename was refused. Cleared on the next keystroke. */
+  const [nameErrors, setNameErrors] = useState<Record<string, string>>({});
+  const [pendingRename, setPendingRename] = useState<PendingRename | null>(null);
   /** Department id whose "add section" row is open; null when none is. */
   const [addingUnder, setAddingUnder] = useState<string | null>(null);
   const [newSection, setNewSection] = useState<NewSectionDraft>(emptyNewSection);
@@ -288,6 +321,44 @@ export function OrgEditor({
     [patch],
   );
 
+  /** 课名 edit: stores the keystroke and clears the previous refusal for that row. */
+  const editName = useCallback((sectionId: string, next: string): void => {
+    setNameDrafts((previous) => ({ ...previous, [sectionId]: next }));
+    setNameErrors((previous) =>
+      previous[sectionId] === undefined ? previous : omitKey(previous, sectionId),
+    );
+  }, []);
+
+  const confirmRename = useCallback(async (pending: PendingRename): Promise<void> => {
+    if (pending.status === "saving") {
+      return;
+    }
+    setPendingRename({ ...pending, status: "saving" });
+    const { section, nextName } = pending;
+
+    const result = await renameSection({ id: section.id, nameRaw: nextName });
+
+    setPendingRename(null);
+    if (result.ok) {
+      // Draft dropped rather than kept: revalidatePath("/admin") re-renders with the
+      // stored name, and an absent draft reads straight from props.
+      setNameDrafts((previous) => omitKey(previous, section.id));
+      toast.success(`${section.name} 已改名为 ${nextName}`, {
+        description: "历史考勤中的原课名已登记为别名,继续匹配到本课。",
+      });
+      return;
+    }
+    // The typed value is left in place on purpose - the operator has to be able to see
+    // and fix what was refused.
+    setNameErrors((previous) => ({
+      ...previous,
+      [section.id]: result.fieldErrors.name ?? result.message,
+    }));
+    toast.error(`${section.name}: ${result.fieldErrors.name ?? result.message}`);
+    // setPendingRename is listed because this callback awaits: the React Compiler
+    // cannot prove the setter is the stable one across the await, and rejects [].
+  }, [setPendingRename]);
+
   const handleCreateSection = useCallback(
     async (departmentId: string, departmentName: string, submitted: NewSectionDraft) => {
       if (submitted.status === "saving") {
@@ -337,7 +408,7 @@ export function OrgEditor({
       <table className="w-full border-collapse text-sm">
         <caption className="sr-only">
           组织结构编辑表。可修改排序、责任者、邮箱与部门编码,并在部门下新增课。
-          已保存的部/课名称不可在此修改。每行独立保存。
+          课名称可通过「改名」按钮修改,原名会登记为别名以保留历史考勤匹配;部门名称不可修改。每行独立保存。
         </caption>
         <thead>
           <tr className="border-y border-border bg-muted/40 text-left">
@@ -356,7 +427,7 @@ export function OrgEditor({
             <th scope="col" className={`${HEAD_CLASS} w-52`}>
               邮箱
             </th>
-            <th scope="col" className={`${HEAD_CLASS} w-32 text-right`}>
+            <th scope="col" className={`${HEAD_CLASS} w-44 text-right`}>
               操作
             </th>
           </tr>
@@ -449,6 +520,15 @@ export function OrgEditor({
                   const sectionSaving = sectionEffective.status === "saving";
                   const sectionDirty = isSectionDirty(section, sectionDraft);
                   const sectionSeed = () => draftFromSection(section);
+                  const nameValue = nameDrafts[section.id] ?? section.name;
+                  const nameError = nameErrors[section.id];
+                  const renaming =
+                    pendingRename !== null &&
+                    pendingRename.section.id === section.id &&
+                    pendingRename.status === "saving";
+                  // Blank is not "dirty": it would only ever be refused by the action,
+                  // and enabling 改名 for it invites a pointless round trip.
+                  const nameDirty = nameValue.trim() !== "" && nameValue.trim() !== section.name;
 
                   return (
                     <tr
@@ -462,8 +542,18 @@ export function OrgEditor({
                       }`}
                     >
                       <th scope="row" className="py-2 pr-4 pl-8 text-left font-normal">
-                        <span className="mr-1.5 text-muted-foreground/50">└</span>
-                        {section.name}
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-muted-foreground/50">└</span>
+                          <Input
+                            value={nameValue}
+                            disabled={renaming}
+                            maxLength={TEXT_MAX_LENGTH}
+                            aria-label={`${department.name} 下 ${section.name} 的课名称`}
+                            aria-invalid={nameError !== undefined}
+                            title={nameError}
+                            onChange={(event) => editName(section.id, event.target.value)}
+                          />
+                        </div>
                       </th>
                       {/* Sections have no code column - the cell is held open so the
                           five columns stay aligned with the department rows above. */}
@@ -508,7 +598,22 @@ export function OrgEditor({
                         <Button
                           size="xs"
                           variant="outline"
-                          disabled={!sectionDirty || sectionSaving}
+                          disabled={!nameDirty || renaming || sectionSaving}
+                          onClick={() =>
+                            setPendingRename({
+                              section,
+                              nextName: nameValue.trim(),
+                              status: "confirming",
+                            })
+                          }
+                        >
+                          {renaming ? "改名中" : "改名"}
+                        </Button>
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          className="ml-1"
+                          disabled={!sectionDirty || sectionSaving || renaming}
                           onClick={() => void handleSaveSection(section, sectionEffective)}
                         >
                           {sectionSaving ? "保存中" : "保存"}
@@ -642,9 +747,63 @@ export function OrgEditor({
       ) : null}
 
       <p className="px-4 pt-3 text-xs text-muted-foreground">
-        部/课名称是组织数据的自然键,已保存的行不可在此改名——改名会导致下次 Excel
-        导入新建重复课,计划与实绩被拆分。删除同样不在本页范围内(存在计划/实绩引用)。
+        课名称改名后,原课名会登记为别名,历史考勤数据仍会匹配到本课。
+        部门名称是所有下属课的匹配键的一部分,不在本页范围内。
+        删除同样不在本页范围内(存在计划/实绩引用)。
       </p>
+
+      {pendingRename === null ? null : (
+        <AlertDialog
+          open
+          onOpenChange={(open) => {
+            // Escape is the only route to false - neither button is a Close part - and
+            // it means the same as 取消: close, write nothing, keep what was typed.
+            if (!open && pendingRename.status !== "saving") {
+              setPendingRename(null);
+            }
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogTitle>确认修改课名称</AlertDialogTitle>
+            <AlertDialogDescription>
+              该课的历史考勤数据按「部名 + 课名」匹配,改名后原名会登记为别名。
+            </AlertDialogDescription>
+
+            <dl className="mt-3 space-y-1 rounded-md bg-muted/40 px-3 py-2 text-sm">
+              <div className="flex items-baseline justify-between gap-3">
+                <dt className="text-muted-foreground">原课名</dt>
+                <dd className="font-medium">{pendingRename.section.name}</dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-3">
+                <dt className="text-muted-foreground">新课名</dt>
+                <dd className="font-medium text-plan">{pendingRename.nextName}</dd>
+              </div>
+            </dl>
+
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+              <li>历史考勤会通过别名继续匹配到本课,计划与实绩不会被拆分。</li>
+              <li>本次改名会记入主数据修改履历。</li>
+              <li>若新课名已被本部门其他课或其别名占用,改名会被拒绝,数据不变。</li>
+            </ul>
+
+            <AlertDialogFooter>
+              <Button
+                variant="outline"
+                disabled={pendingRename.status === "saving"}
+                onClick={() => setPendingRename(null)}
+              >
+                取消
+              </Button>
+              <Button
+                disabled={pendingRename.status === "saving"}
+                onClick={() => void confirmRename(pendingRename)}
+              >
+                {pendingRename.status === "saving" ? "改名中" : "确认改名"}
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
     </div>
   );
 }
