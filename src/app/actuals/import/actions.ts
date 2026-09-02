@@ -22,6 +22,7 @@
 
 import { revalidatePath } from "next/cache";
 
+import { requireAdmin } from "@/lib/auth";
 import {
   ingestAttendanceSource,
   inspectAttendanceSource,
@@ -33,6 +34,7 @@ import {
   checkWorkbookSignature,
   sanitiseFileMtime,
 } from "@/lib/attendance/upload-guard";
+import { joinWarnings } from "@/lib/attendance/verdict";
 import { fiscalMonthLabel } from "@/lib/db/date";
 import { hasSuccessfulImport } from "@/lib/db/import-log.repo";
 import type { ImportStatus } from "@/lib/db/types";
@@ -59,8 +61,25 @@ export interface AttendancePreviewFile {
   workDates: readonly string[];
   /** Note or failure summary, exactly as it would be stored. */
   message: string | null;
+  /**
+   * D-222 completeness warning, exactly as it would be stored, or null.
+   *
+   * The preview is the one place this can still change the outcome: an operator who reads
+   * 疑似导出过早 BEFORE approving can go ask HR to re-export instead of importing a day
+   * that is missing hours. It is deliberately not a block (只告警不拦截) - the rows are
+   * valid, and the same day can be re-uploaded over them later.
+   */
+  warning: string | null;
   /** True for a rest-day report - the UI labels it 休日报表 rather than showing a bare 0. */
   isRestDay: boolean;
+  /**
+   * Rows in the file that D-103 excludes (员工类别 ∉ {管理职, 管间人员}).
+   *
+   * Shown next to `rowCount` so the operator can check the subtraction against the file
+   * before approving. A 577-row export previewing as 180 rows with no explanation looks
+   * like data loss, and an operator who reads it that way cancels a correct import.
+   */
+  categoryFilteredRows: number;
   /**
    * True when import_log already holds a SUCCESS/PARTIAL for this file name (D-123).
    * The commit refuses these unless the operator explicitly allows re-import.
@@ -88,7 +107,18 @@ export interface AttendanceCommitFile {
   rowsStored: number;
   monthLabels: readonly string[];
   message: string | null;
+  /**
+   * D-222 completeness warning, byte-identical to what `import_log.warning_message` now
+   * holds for this file, or null.
+   *
+   * Repeated after the commit rather than assumed read at preview time: the rows are
+   * already stored by this point, and the operator's next action - asking HR to re-export
+   * this day - only happens if the result list says so out loud.
+   */
+  warning: string | null;
   isRestDay: boolean;
+  /** Rows excluded by D-103's 员工类别 filter, repeated so the stored count reconciles. */
+  categoryFilteredRows: number;
   /** False when even the import_log write failed, i.e. this attempt is not in the audit trail. */
   logged: boolean;
 }
@@ -206,6 +236,14 @@ async function readUploads(
 export async function previewAttendanceImport(
   formData: FormData,
 ): Promise<AttendancePreviewResult> {
+  // Gate first, before the uploads are read: an unauthorised caller must not be able
+  // to probe the workbook signature checks. See src/lib/auth.ts for why the check has
+  // to live here and not in middleware.
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    return { ok: false, message: gate.message };
+  }
+
   const uploads = await readUploads(formData, new Date());
   if (!uploads.ok) {
     return { ok: false, message: uploads.message };
@@ -233,7 +271,9 @@ export async function previewAttendanceImport(
         monthLabels: [],
         workDates: [],
         message: "解析文件时发生意外错误，该文件无法导入。请确认这是 HR 导出的日考勤报表。",
+        warning: null,
         isRestDay: false,
+        categoryFilteredRows: 0,
         alreadyImported: false,
       });
       continue;
@@ -262,7 +302,9 @@ export async function previewAttendanceImport(
       monthLabels: monthLabelsOf(inspected.months),
       workDates: inspected.workDates,
       message: inspected.verdict.errorMessage,
+      warning: joinWarnings(inspected.verdict.warnings),
       isRestDay: inspected.verdict.isRestDay,
+      categoryFilteredRows: inspected.verdict.categoryFilteredRows,
       alreadyImported,
     });
   }
@@ -287,6 +329,11 @@ export async function previewAttendanceImport(
 export async function commitAttendanceImport(
   formData: FormData,
 ): Promise<AttendanceCommitResult> {
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    return { ok: false, message: gate.message };
+  }
+
   const allowReimport = formData.get("allowReimport") === "yes";
   const uploads = await readUploads(formData, new Date());
   if (!uploads.ok) {
@@ -339,7 +386,9 @@ export async function commitAttendanceImport(
       rowsStored: result.rowsStored,
       monthLabels: monthLabelsOf(result.months),
       message: result.errorMessage,
+      warning: joinWarnings(result.warnings),
       isRestDay: result.isRestDay,
+      categoryFilteredRows: result.categoryFilteredRows,
       logged: result.logId !== null,
     });
   }

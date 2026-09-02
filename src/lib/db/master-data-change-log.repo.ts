@@ -24,9 +24,14 @@
 
 import type { MasterDataChangeLog, Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { REASON_MAX_LENGTH, normaliseReason } from "./reason";
 
 /** Entity classes that carry a snapshot trail. Matches the `entity` column. */
-export const MASTER_DATA_ENTITIES = ["organization", "job_title_rule"] as const;
+export const MASTER_DATA_ENTITIES = [
+  "organization",
+  "job_title_rule",
+  "actual_baseline",
+] as const;
 
 export type MasterDataEntity = (typeof MASTER_DATA_ENTITIES)[number];
 
@@ -62,6 +67,8 @@ export interface MasterDataChangeLogDto {
   action: MasterDataAction;
   targetKey: string;
   snapshot: string;
+  /** Null whenever the operator did not type one, which is the normal case (D-184). */
+  reason: string | null;
   changedAt: Date;
   changedBy: string;
 }
@@ -71,6 +78,14 @@ export interface MasterDataSnapshotInput {
   action: MasterDataAction;
   /** Section name, department name, or jobTitle. See MASTER_DATA_ALL_TARGETS. */
   targetKey: string;
+  /**
+   * Optional free-text why (D-184). Blank collapses to null.
+   *
+   * Optional here on purpose, and it stays optional at every layer: an organisation
+   * change is rare and its motive is usually evident from the snapshot, so making it
+   * mandatory - as D-214 does for plan hours - would only collect the word "调整".
+   */
+  reason?: string | null;
 }
 
 /**
@@ -88,6 +103,7 @@ function toMasterDataChangeLogDto(row: MasterDataChangeLog): MasterDataChangeLog
     action: row.action as MasterDataAction,
     targetKey: row.targetKey,
     snapshot: row.snapshot,
+    reason: row.reason,
     changedAt: row.changedAt,
     changedBy: row.changedBy,
   };
@@ -141,6 +157,30 @@ async function serialiseEntity(
     });
     return JSON.stringify({ departments, sections });
   }
+  if (entity === "actual_baseline") {
+    // Only manual rows. Fold rows are reproducible from attendance_raw at any time, so
+    // snapshotting them would bloat the trail with data that is not at risk; a hand-typed
+    // baseline has no other copy anywhere and is exactly what needs to be recoverable.
+    const actuals = await tx.actual.findMany({
+      where: { source: "manual" },
+      select: {
+        month: true,
+        totalHours: true,
+        source: true,
+        section: { select: { name: true, department: { select: { name: true } } } },
+      },
+      orderBy: [{ month: "asc" }, { sectionId: "asc" }],
+    });
+    return JSON.stringify({
+      actuals: actuals.map((a) => ({
+        department: a.section.department.name,
+        section: a.section.name,
+        month: a.month,
+        totalHours: a.totalHours,
+        source: a.source,
+      })),
+    });
+  }
   const rules = await tx.jobTitleRule.findMany({
     select: {
       jobTitle: true,
@@ -153,7 +193,7 @@ async function serialiseEntity(
   return JSON.stringify({ rules });
 }
 
-/** @throws if the entity, action, or target key would widen a plain String column. */
+/** @throws if the entity, action, target key, or reason would widen a plain String column. */
 function assertSnapshotInput(input: MasterDataSnapshotInput): void {
   if (!MASTER_DATA_ENTITY_SET.has(input.entity)) {
     throw new Error(
@@ -171,6 +211,13 @@ function assertSnapshotInput(input: MasterDataSnapshotInput): void {
     throw new Error(
       "Invalid master data snapshot: targetKey is required. A snapshot that does " +
         "not say what was edited cannot be read back usefully (D-173).",
+    );
+  }
+  // Length only. A blank reason is legal (D-184) and normaliseReason turns it into
+  // null; there is nothing else to check, because the column is free text by design.
+  if (input.reason !== undefined && input.reason !== null && input.reason.length > REASON_MAX_LENGTH) {
+    throw new Error(
+      `Invalid master data snapshot: reason exceeds ${REASON_MAX_LENGTH} characters.`,
     );
   }
 }
@@ -198,6 +245,7 @@ export async function recordMasterDataSnapshot(
       action: input.action,
       targetKey: input.targetKey,
       snapshot,
+      reason: normaliseReason(input.reason),
     },
   });
 }
@@ -214,6 +262,10 @@ export async function recordMasterDataSnapshot(
  *
  * The emptiness check and the insert share the caller's transaction, so two
  * concurrent first writes cannot both decide the trail is empty.
+ *
+ * The baseline row never carries a reason: it describes the state before anybody
+ * edited anything, so the operator's explanation for the edit that triggered it
+ * belongs on that edit's own row, not here.
  */
 export async function ensureMasterDataBaseline(
   tx: Prisma.TransactionClient,
@@ -250,36 +302,56 @@ export async function ensureMasterDataBaseline(
  *   need the result: an update addressed by id does not know the human-readable key
  *   until the row comes back, and an upsert only knows whether it created or updated
  *   from what it observed. Taken as one callback so a caller cannot supply a
- *   `create` action alongside a key from an updated row.
+ *   `create` action alongside a key from an updated row. May also return the
+ *   operator's optional `reason` (D-184); omitting it stores null.
  */
 export async function writeMasterDataWithAudit<T>(
   entity: MasterDataEntity,
   write: (tx: Prisma.TransactionClient) => Promise<T>,
-  describe: (written: T) => { action: MasterDataAction; targetKey: string },
+  describe: (written: T) => {
+    action: MasterDataAction;
+    targetKey: string;
+    reason?: string | null;
+  },
 ): Promise<T> {
   return prisma.$transaction(async (tx) => {
     await ensureMasterDataBaseline(tx, entity);
     const written = await write(tx);
-    const { action, targetKey } = describe(written);
-    await recordMasterDataSnapshot(tx, { entity, action, targetKey });
+    const { action, targetKey, reason } = describe(written);
+    await recordMasterDataSnapshot(tx, { entity, action, targetKey, reason });
     return written;
   });
+}
+
+/** Paging window for the audit page. Both fields optional; defaults are safe. */
+export interface MasterDataChangeLogQuery {
+  entity?: MasterDataEntity;
+  /** Caps the result. Adjusting 24 sections one at a time writes 24 rows. */
+  limit?: number;
+  /** Rows to skip. Paired with countMasterDataChangeLogs() for page numbers. */
+  offset?: number;
 }
 
 /**
  * Snapshots newest first, optionally for one entity class.
  *
- * @param limit - caps the result. Adjusting every section's order one at a time
- *   produces one row per edit, so an unbounded read is not a safe default.
+ * Takes an options object rather than positional arguments because there are now three
+ * independent knobs: a call that wants page 3 of everything would otherwise have to
+ * pass `undefined` for the entity and repeat the default limit just to reach `offset`.
+ *
+ * Ordering is (changedAt desc, id desc). The timestamp alone is not a total order -
+ * one operator action writes a baseline row and a snapshot row inside a single
+ * transaction, and SQLite can stamp both with the same millisecond, which would let
+ * the same row appear on two pages or on none.
  */
 export async function findMasterDataChangeLogs(
-  entity?: MasterDataEntity,
-  limit = 50,
+  query: MasterDataChangeLogQuery = {},
 ): Promise<MasterDataChangeLogDto[]> {
   const rows = await prisma.masterDataChangeLog.findMany({
-    where: entity === undefined ? undefined : { entity },
-    orderBy: { changedAt: "desc" },
-    take: limit,
+    where: query.entity === undefined ? undefined : { entity: query.entity },
+    orderBy: [{ changedAt: "desc" }, { id: "desc" }],
+    take: query.limit ?? 50,
+    skip: query.offset ?? 0,
   });
   return rows.map(toMasterDataChangeLogDto);
 }

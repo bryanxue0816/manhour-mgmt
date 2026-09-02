@@ -46,6 +46,7 @@
 import { revalidatePath } from "next/cache";
 
 import { Prisma } from "@/generated/prisma/client";
+import { requireAdmin } from "@/lib/auth";
 import { createJobTitleRule, upsertJobTitleRule } from "@/lib/db/job-title-rule.repo";
 import {
   SectionRenameError,
@@ -54,6 +55,7 @@ import {
   updateSection,
   upsertSection,
 } from "@/lib/db/org.repo";
+import { REASON_MAX_LENGTH } from "@/lib/db/reason";
 
 /** Guards the free-text remark against an unbounded write. */
 const REMARK_MAX_LENGTH = 200;
@@ -269,6 +271,15 @@ export interface SaveJobTitleRuleInput {
    * therefore checked and reported; on edit, hitting the same key is the point.
    */
   isCreate: boolean;
+  /**
+   * Optional free-text why, recorded on the audit snapshot (D-184).
+   *
+   * Distinct from `remarkRaw` even though both are optional free text: `remark` is a
+   * column of `job_title_rule` describing the rule as it now stands, and is overwritten
+   * on the next edit. This one is never stored on the rule - it belongs to one snapshot
+   * and stays readable after the rule has changed again.
+   */
+  reasonRaw?: string | null;
 }
 
 /**
@@ -281,6 +292,14 @@ export interface SaveJobTitleRuleInput {
 export async function saveJobTitleRule(
   input: SaveJobTitleRuleInput,
 ): Promise<AdminActionResult<JobTitleRuleField>> {
+  // Gate first, before any parsing: an unauthorised caller must not learn which
+  // inputs this action accepts. See src/lib/auth.ts for why the check has to live
+  // here and not in middleware.
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    return reject(gate.message);
+  }
+
   const jobTitle = parseRequiredText(input?.jobTitleRaw, "职位名称", 50);
   if ("error" in jobTitle) {
     return reject("请修正标红的输入后重试。", { jobTitle: jobTitle.error });
@@ -298,24 +317,36 @@ export async function saveJobTitleRule(
     return reject("请求不完整,请刷新页面后重试。");
   }
 
+  // Length-only, not a field error - see saveDepartment for why.
+  const reason = parseOptionalText(input.reasonRaw, "变更原因", REASON_MAX_LENGTH);
+  if ("error" in reason) {
+    return reject(reason.error);
+  }
+
   try {
     if (input.isCreate) {
       // createJobTitleRule() rather than the upsert: a duplicate must fail loudly,
       // because jobTitle is the @id and an upsert would overwrite a row already on
       // screen. Prisma reports the PK collision as P2002, caught below.
-      await createJobTitleRule({
-        jobTitle: jobTitle.value,
-        excludePersonnelHours: input.excludePersonnelHours,
-        excludeOvertimeHours: input.excludeOvertimeHours,
-        remark: remark.value,
-      });
+      await createJobTitleRule(
+        {
+          jobTitle: jobTitle.value,
+          excludePersonnelHours: input.excludePersonnelHours,
+          excludeOvertimeHours: input.excludeOvertimeHours,
+          remark: remark.value,
+        },
+        reason.value,
+      );
     } else {
-      await upsertJobTitleRule({
-        jobTitle: jobTitle.value,
-        excludePersonnelHours: input.excludePersonnelHours,
-        excludeOvertimeHours: input.excludeOvertimeHours,
-        remark: remark.value,
-      });
+      await upsertJobTitleRule(
+        {
+          jobTitle: jobTitle.value,
+          excludePersonnelHours: input.excludePersonnelHours,
+          excludeOvertimeHours: input.excludeOvertimeHours,
+          remark: remark.value,
+        },
+        reason.value,
+      );
     }
   } catch (error) {
     if (prismaErrorCode(error) === UNIQUE_VIOLATION) {
@@ -344,6 +375,14 @@ export interface SaveDepartmentInput {
   sortOrderRaw: string;
   managerNameRaw?: string | null;
   managerEmailRaw?: string | null;
+  /**
+   * Optional free-text why, recorded on the audit snapshot (D-184).
+   *
+   * Never validated as required and never reported as a field error: an omitted reason
+   * is the normal case, so rejecting the save for it would make the audit trail an
+   * obstacle to fixing a typo rather than a record of it.
+   */
+  reasonRaw?: string | null;
 }
 
 /**
@@ -354,6 +393,11 @@ export interface SaveDepartmentInput {
 export async function saveDepartment(
   input: SaveDepartmentInput,
 ): Promise<AdminActionResult<DepartmentField>> {
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    return reject(gate.message);
+  }
+
   if (typeof input?.id !== "string" || input.id.trim() === "") {
     return reject("缺少部门标识,请刷新页面后重试。");
   }
@@ -395,13 +439,26 @@ export async function saveDepartment(
     return reject("请修正标红的输入后重试。", fieldErrors);
   }
 
+  // Length-only, and NOT a field error (D-184): ReasonField caps typing at
+  // REASON_MAX_LENGTH, so an over-long reason means the payload did not come from the
+  // editor and there is no input on screen to mark. Checked after the correctable
+  // fields so a real typo is still reported first.
+  const reason = parseOptionalText(input.reasonRaw, "变更原因", REASON_MAX_LENGTH);
+  if ("error" in reason) {
+    return reject(reason.error);
+  }
+
   try {
-    await updateDepartment(input.id, {
-      code: code.value,
-      sortOrder: sortOrder.value,
-      managerName: managerName.value,
-      managerEmail: managerEmail.value,
-    });
+    await updateDepartment(
+      input.id,
+      {
+        code: code.value,
+        sortOrder: sortOrder.value,
+        managerName: managerName.value,
+        managerEmail: managerEmail.value,
+      },
+      reason.value,
+    );
   } catch (error) {
     const failed = prismaErrorCode(error);
     if (failed === UNIQUE_VIOLATION) {
@@ -431,12 +488,19 @@ export interface SaveSectionInput {
   sortOrderRaw: string;
   managerNameRaw?: string | null;
   managerEmailRaw?: string | null;
+  /** Optional free-text why, recorded on the audit snapshot (D-184). */
+  reasonRaw?: string | null;
 }
 
 /** Updates one section's editable columns. Renaming goes through renameSection(). */
 export async function saveSection(
   input: SaveSectionInput,
 ): Promise<AdminActionResult<SectionField>> {
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    return reject(gate.message);
+  }
+
   if (typeof input?.id !== "string" || input.id.trim() === "") {
     return reject("缺少课标识,请刷新页面后重试。");
   }
@@ -463,12 +527,22 @@ export async function saveSection(
     return reject("请修正标红的输入后重试。", fieldErrors);
   }
 
+  // Length-only, not a field error - see saveDepartment for why.
+  const reason = parseOptionalText(input.reasonRaw, "变更原因", REASON_MAX_LENGTH);
+  if ("error" in reason) {
+    return reject(reason.error);
+  }
+
   try {
-    await updateSection(input.id, {
-      sortOrder: sortOrder.value,
-      managerName: managerName.value,
-      managerEmail: managerEmail.value,
-    });
+    await updateSection(
+      input.id,
+      {
+        sortOrder: sortOrder.value,
+        managerName: managerName.value,
+        managerEmail: managerEmail.value,
+      },
+      reason.value,
+    );
   } catch (error) {
     if (prismaErrorCode(error) === RECORD_NOT_FOUND) {
       return reject("该课已不存在,请刷新页面后重试。");
@@ -485,6 +559,15 @@ export interface RenameSectionInput {
   id: string;
   /** New 课 name, exactly as typed. Compared verbatim - no normalisation (aliasKey). */
   nameRaw: string;
+  /**
+   * Optional free-text why, recorded on the audit snapshot (D-184).
+   *
+   * The rename dialog asks for it because a rename is the one change here whose motive
+   * is not visible in the snapshot - the new name explains what, never why - but it is
+   * still optional: a refused rename must not also lose the operator's explanation, and
+   * requiring one would only harvest the word "调整".
+   */
+  reasonRaw?: string | null;
 }
 
 /**
@@ -501,6 +584,11 @@ export interface RenameSectionInput {
 export async function renameSection(
   input: RenameSectionInput,
 ): Promise<AdminActionResult<SectionField>> {
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    return reject(gate.message);
+  }
+
   if (typeof input?.id !== "string" || input.id.trim() === "") {
     return reject("缺少课标识,请刷新页面后重试。");
   }
@@ -510,8 +598,14 @@ export async function renameSection(
     return reject("请修正标红的输入后重试。", { name: name.error });
   }
 
+  // Length-only, not a field error - see saveDepartment for why.
+  const reason = parseOptionalText(input.reasonRaw, "变更原因", REASON_MAX_LENGTH);
+  if ("error" in reason) {
+    return reject(reason.error);
+  }
+
   try {
-    await renameSectionWithAlias(input.id, name.value);
+    await renameSectionWithAlias(input.id, name.value, reason.value);
   } catch (error) {
     if (error instanceof SectionRenameError) {
       switch (error.reason) {
@@ -559,6 +653,8 @@ export interface CreateSectionInput {
   sortOrderRaw: string;
   managerNameRaw?: string | null;
   managerEmailRaw?: string | null;
+  /** Optional free-text why, recorded on the audit snapshot (D-184). */
+  reasonRaw?: string | null;
 }
 
 /**
@@ -574,6 +670,11 @@ export interface CreateSectionInput {
 export async function createSection(
   input: CreateSectionInput,
 ): Promise<AdminActionResult<SectionField>> {
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    return reject(gate.message);
+  }
+
   if (typeof input?.departmentId !== "string" || input.departmentId.trim() === "") {
     return reject("请先选择所属部门。");
   }
@@ -609,14 +710,23 @@ export async function createSection(
     return reject("请修正标红的输入后重试。", fieldErrors);
   }
 
+  // Length-only, not a field error - see saveDepartment for why.
+  const reason = parseOptionalText(input.reasonRaw, "变更原因", REASON_MAX_LENGTH);
+  if ("error" in reason) {
+    return reject(reason.error);
+  }
+
   try {
-    await upsertSection({
-      departmentId: input.departmentId,
-      name: name.value,
-      sortOrder: sortOrder.value,
-      managerName: managerName.value,
-      managerEmail: managerEmail.value,
-    });
+    await upsertSection(
+      {
+        departmentId: input.departmentId,
+        name: name.value,
+        sortOrder: sortOrder.value,
+        managerName: managerName.value,
+        managerEmail: managerEmail.value,
+      },
+      reason.value,
+    );
   } catch (error) {
     const failed = prismaErrorCode(error);
     // P2003: the departmentId does not exist. Reachable when the page was rendered

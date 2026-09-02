@@ -14,6 +14,7 @@ import type { ReactElement } from "react";
 
 import { AttendanceImportForm } from "./_components/AttendanceImportForm";
 import { MainNav } from "@/components/layout/MainNav";
+import { requireAdminPage } from "@/lib/auth-page";
 
 /**
  * Without this Next prerenders the route at build time. This shell reads nothing from the
@@ -28,21 +29,25 @@ export const metadata: Metadata = {
   description: "上传 HR 日考勤报表，逐文件预览后写入实绩工时。",
 };
 
-export default function AttendanceImportPage(): ReactElement {
+// Async purely so the admin guard can be awaited - this shell still reads nothing
+// from the database itself.
+export default async function AttendanceImportPage(): Promise<ReactElement> {
+  await requireAdminPage("/actuals/import");
+
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b border-border bg-card">
         <div className="mx-auto max-w-full space-y-4 px-6 py-6">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <MainNav active="actuals" />
-            <span className="text-xs text-muted-foreground">考勤导入 · 内网免登录</span>
+            <span className="text-xs text-muted-foreground">考勤导入 · 管理员已登录</span>
           </div>
           <div>
             <h1 className="font-heading text-2xl font-semibold tracking-tight">
               导入考勤数据
             </h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              上传 HR 导出的日考勤报表（.xls）。先检查预览逐文件的判定结果，确认后再写入。
+              上传 HR 导出的日考勤报表（.csv / .xls / .xlsx）。先检查预览逐文件的判定结果，确认后再写入。
               导入会重算受影响月份的实绩工时。
             </p>
           </div>

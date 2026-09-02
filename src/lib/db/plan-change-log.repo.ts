@@ -17,7 +17,9 @@
 
 import type { Prisma, PlanChangeLog } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { fiscalMonthLabel } from "./date";
 import { assertFiniteHours } from "./hours";
+import { normaliseReason } from "./reason";
 import type { PlanChangeField, PlanChangeLogInput } from "./types";
 
 /** Read shape. Declared here so the generated Prisma row type stays internal. */
@@ -63,21 +65,6 @@ function toPlanChangeLogDto(row: PlanChangeLog): PlanChangeLogDto {
     changedAt: row.changedAt,
     changedBy: row.changedBy,
   };
-}
-
-/**
- * Collapses a blank reason to null.
- *
- * `reason` is optional (D-143), and "" / "   " mean the same thing as omitting it.
- * Storing the empty string instead would make `reason IS NOT NULL` a useless
- * filter for "changes that came with an explanation".
- */
-function normaliseReason(reason: string | null | undefined): string | null {
-  if (reason === undefined || reason === null) {
-    return null;
-  }
-  const trimmed = reason.trim();
-  return trimmed === "" ? null : trimmed;
 }
 
 /**
@@ -214,4 +201,78 @@ export async function countPlanChangeLogsByFiscalYear(
   fiscalYearId: string,
 ): Promise<number> {
   return prisma.planChangeLog.count({ where: { plan: { fiscalYearId } } });
+}
+
+/**
+ * One row of the audit page's plan tab (D-183): the trail with its foreign keys
+ * already resolved to the words on screen.
+ *
+ * Resolution happens here rather than in the page because `planId` is a cuid and
+ * `month` is a fiscal index (1 = April). A page that rendered either verbatim would be
+ * unreadable by the only people who can judge whether a change was legitimate, and
+ * pushing the join into the page would mean either an N+1 per row or the page owning
+ * knowledge of the Plan -> Section -> Department shape.
+ */
+export interface PlanChangeLogRowDto {
+  id: string;
+  departmentName: string;
+  sectionName: string;
+  /** Calendar label, e.g. "26/04" - see fiscalMonthLabel(). */
+  monthLabel: string;
+  field: PlanChangeField;
+  beforeValue: number;
+  afterValue: number;
+  /** Mandatory at the UI layer since D-214, but older rows predate that. */
+  reason: string | null;
+  changedAt: Date;
+  changedBy: string;
+}
+
+/** Paging window for the audit page's plan tab. Defaults are safe. */
+export interface PlanChangeLogPageQuery {
+  fiscalYearId: string;
+  /** Caps the result. Re-typing one cell during a review writes a row each time. */
+  limit?: number;
+  /** Rows to skip. Paired with countPlanChangeLogsByFiscalYear() for page numbers. */
+  offset?: number;
+}
+
+/**
+ * A page of plan-edit history for one fiscal year, newest first, names resolved.
+ *
+ * Ordering is (changedAt desc, id desc) for the same reason as the master-data trail:
+ * one cell edit can write two rows - planned and challenge hours - inside a single
+ * transaction, and SQLite may stamp both with the same millisecond. Without the id
+ * tiebreak the pair has no total order, so a row could surface on two pages or on none.
+ */
+export async function findPlanChangeLogPage(
+  query: PlanChangeLogPageQuery,
+): Promise<PlanChangeLogRowDto[]> {
+  const rows = await prisma.planChangeLog.findMany({
+    where: { plan: { fiscalYearId: query.fiscalYearId } },
+    orderBy: [{ changedAt: "desc" }, { id: "desc" }],
+    take: query.limit ?? 50,
+    skip: query.offset ?? 0,
+    include: {
+      plan: {
+        select: {
+          month: true,
+          fiscalYear: { select: { year: true } },
+          section: { select: { name: true, department: { select: { name: true } } } },
+        },
+      },
+    },
+  });
+  return rows.map((row) => ({
+    id: row.id,
+    departmentName: row.plan.section.department.name,
+    sectionName: row.plan.section.name,
+    monthLabel: fiscalMonthLabel(row.plan.fiscalYear.year, row.plan.month),
+    field: row.field as PlanChangeField,
+    beforeValue: row.beforeValue,
+    afterValue: row.afterValue,
+    reason: row.reason,
+    changedAt: row.changedAt,
+    changedBy: row.changedBy,
+  }));
 }

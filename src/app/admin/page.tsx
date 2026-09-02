@@ -18,6 +18,7 @@
  */
 import type { ReactElement, ReactNode } from "react";
 
+import { requireAdminPage } from "@/lib/auth-page";
 import { getAllConfig } from "@/lib/db/config.repo";
 import { MainNav } from "@/components/layout/MainNav";
 import { formatDateOnly } from "@/lib/db/date";
@@ -162,6 +163,8 @@ const CONFIG_COLUMNS: readonly KvColumn<ConfigRow>[] = [
 ];
 
 export default async function AdminPage(): Promise<ReactElement> {
+  await requireAdminPage("/admin");
+
   // Independent reads - fired together so the page waits on the slowest, not the sum.
   const [snapshot, fiscalYears, jobTitleRules, config] = await Promise.all([
     loadOrgSnapshot(),
@@ -183,7 +186,7 @@ export default async function AdminPage(): Promise<ReactElement> {
           <div className="mb-5 flex items-center justify-between gap-6">
             <MainNav active="admin" />
             <span className="text-xs text-muted-foreground">
-              {currentFiscalYear === undefined ? "未设置财年" : currentFiscalYear.name} · 内网免登录
+              {currentFiscalYear === undefined ? "未设置财年" : currentFiscalYear.name} · 管理员已登录
             </span>
           </div>
           <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
@@ -199,7 +202,7 @@ export default async function AdminPage(): Promise<ReactElement> {
               who rely on it - operators never read schema comments. */}
           <p className="mt-3 max-w-2xl rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground ring-1 ring-border">
             本页每次成功保存，都会留存一份当时的完整快照（组织结构与职位规则各自独立记录，永久保留）。
-            但本系统为内网免登录，<span className="font-medium text-warn">无法记录操作者身份</span>
+            但所有管理员共用同一个口令，<span className="font-medium text-warn">无法记录操作者身份</span>
             ——快照只能回答「什么时候被改成了什么样」，不能回答「是谁改的」。
           </p>
         </div>

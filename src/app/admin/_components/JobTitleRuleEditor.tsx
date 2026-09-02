@@ -23,6 +23,7 @@
 import { useCallback, useState, type ReactElement } from "react";
 import { toast } from "sonner";
 
+import { ReasonField } from "./ReasonField";
 import { saveJobTitleRule, type JobTitleRuleField } from "../actions";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -37,6 +38,15 @@ interface RuleDraft {
   excludePersonnelHours: boolean;
   excludeOvertimeHours: boolean;
   remark: string;
+  /**
+   * Optional why for the audit trail (D-184).
+   *
+   * Not a column of `job_title_rule`, unlike `remark` above. `remark` describes the rule
+   * as it now stands and is overwritten on the next edit; this belongs to the one write
+   * it is submitted with, so it is always seeded blank and discarded with the draft on
+   * success.
+   */
+  reason: string;
   status: "idle" | "saving" | "error";
   fieldErrors: Partial<Record<JobTitleRuleField, string>>;
 }
@@ -51,6 +61,7 @@ const EMPTY_NEW_RULE: NewRuleDraft = {
   excludePersonnelHours: false,
   excludeOvertimeHours: false,
   remark: "",
+  reason: "",
   status: "idle",
   fieldErrors: {},
 };
@@ -78,12 +89,21 @@ function draftFromRule(rule: JobTitleRuleDto): RuleDraft {
     excludeOvertimeHours: rule.excludeOvertimeHours,
     // null and "" are the same thing to an input; the action turns blank back into null.
     remark: rule.remark ?? "",
+    // Always blank: there is no stored reason to read back. This also makes it the
+    // baseline isDirty() compares against, which is why typing one cannot enable 保存.
+    reason: "",
     status: "idle",
     fieldErrors: {},
   };
 }
 
-/** True when the draft differs from what is stored - drives the 保存 button. */
+/**
+ * True when the draft differs from what is stored - drives the 保存 button.
+ *
+ * `reason` is deliberately NOT compared: it annotates a change rather than being one, so
+ * a row where only the reason was typed has nothing to write, and enabling 保存 for it
+ * would record a snapshot identical to the previous one with an explanation of nothing.
+ */
 function isDirty(rule: JobTitleRuleDto, draft: RuleDraft | undefined): boolean {
   if (draft === undefined) {
     return false;
@@ -167,6 +187,7 @@ export function JobTitleRuleEditor({
         excludeOvertimeHours: submitted.excludeOvertimeHours,
         remarkRaw: submitted.remark,
         isCreate: false,
+        reasonRaw: submitted.reason,
       });
 
       if (result.ok) {
@@ -201,6 +222,7 @@ export function JobTitleRuleEditor({
         excludeOvertimeHours: submitted.excludeOvertimeHours,
         remarkRaw: submitted.remark,
         isCreate: true,
+        reasonRaw: submitted.reason,
       });
 
       if (result.ok) {
@@ -228,7 +250,7 @@ export function JobTitleRuleEditor({
       <table className="w-full border-collapse text-sm">
         <caption className="sr-only">
           职位工时排除规则。勾选后该职位的对应工时不计入统计,取消勾选则计入。
-          每行独立保存。
+          每行可填写选填的变更原因,与本次修改一同记入履历。每行独立保存。
         </caption>
         <thead>
           <tr className="border-y border-border bg-muted/40 text-left">
@@ -243,6 +265,9 @@ export function JobTitleRuleEditor({
             </th>
             <th scope="col" className={HEAD_CLASS}>
               备注
+            </th>
+            <th scope="col" className={`${HEAD_CLASS} w-44`}>
+              变更原因
             </th>
             <th scope="col" className={`${HEAD_CLASS} w-24 text-right`}>
               操作
@@ -315,6 +340,20 @@ export function JobTitleRuleEditor({
                           fieldErrors: remaining,
                         };
                       })
+                    }
+                  />
+                </td>
+                <td className="py-2 pr-4">
+                  <ReasonField
+                    value={effective.reason}
+                    label={`${rule.jobTitle} 变更原因`}
+                    disabled={saving}
+                    onChange={(next) =>
+                      // Neither status nor fieldErrors are touched: this is not a
+                      // JobTitleRuleField, so there is no per-field error to clear, and
+                      // the operator may well be explaining the very change whose refusal
+                      // is still marked on the 备注 cell.
+                      patch(rule, (current) => ({ ...current, reason: next }))
                     }
                   />
                 </td>
@@ -409,6 +448,16 @@ export function JobTitleRuleEditor({
                 }
               />
             </td>
+            <td className="py-2.5 pr-4">
+              <ReasonField
+                value={newRule.reason}
+                label="新增规则的变更原因"
+                disabled={newRuleSaving}
+                onChange={(next) =>
+                  setNewRule((previous) => ({ ...previous, reason: next }))
+                }
+              />
+            </td>
             <td className="py-2.5 pr-4 text-right">
               <Button
                 size="xs"
@@ -424,6 +473,7 @@ export function JobTitleRuleEditor({
 
       <p className="px-4 pt-3 text-xs text-muted-foreground">
         「排除」表示该职位的对应工时不计入统计口径(D-109/D-156);「计入」表示正常统计。
+        「备注」是规则本身的说明,会一直保存在规则上;「变更原因」为选填,只记入本次修改的履历,不显示在规则上。
         职位名称是规则的主键,已保存的行不可改名——改名请新增一条规则。
       </p>
     </div>

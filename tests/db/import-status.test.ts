@@ -19,7 +19,9 @@ import {
   MAX_ERROR_MESSAGE_LENGTH,
   assertImportStatus,
   assertImportTrigger,
+  completenessFieldsFor,
   normaliseErrorMessage,
+  normaliseRatio,
 } from "@/lib/db/import-status";
 
 /** `…（已截断）` by codepoint - see the header note. */
@@ -130,5 +132,90 @@ describe("normaliseErrorMessage", () => {
   it("trims before measuring, so padding alone cannot trigger truncation", () => {
     const padded = `   ${"z".repeat(MAX_ERROR_MESSAGE_LENGTH)}   `;
     expect(normaliseErrorMessage(padded)).toBe("z".repeat(MAX_ERROR_MESSAGE_LENGTH));
+  });
+});
+
+describe("normaliseRatio", () => {
+  it("maps null and undefined to null", () => {
+    expect(normaliseRatio(null)).toBeNull();
+    expect(normaliseRatio(undefined)).toBeNull();
+  });
+
+  it("keeps a measured ratio unchanged", () => {
+    expect(normaliseRatio(0.297)).toBe(0.297);
+  });
+
+  it("keeps both ends of the range", () => {
+    expect(normaliseRatio(0)).toBe(0);
+    expect(normaliseRatio(1)).toBe(1);
+  });
+
+  it("maps NaN to null rather than storing it", () => {
+    // 0/0 is the shape a rest-day file would produce upstream. A stored NaN survives every
+    // comparison as false, so a later threshold re-derivation would read it as a healthy
+    // day instead of as a missing measurement.
+    expect(normaliseRatio(Number.NaN)).toBeNull();
+  });
+
+  it("maps Infinity to null", () => {
+    expect(normaliseRatio(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(normaliseRatio(Number.NEGATIVE_INFINITY)).toBeNull();
+  });
+
+  it("clamps out-of-range values rather than dropping the measurement", () => {
+    expect(normaliseRatio(1.4)).toBe(1);
+    expect(normaliseRatio(-0.2)).toBe(0);
+  });
+});
+
+describe("completenessFieldsFor (D-222)", () => {
+  const measured = { warningMessage: "疑似导出过早", unexplainedZeroRatio: 0.3 };
+
+  it("keeps both fields on SUCCESS", () => {
+    expect(completenessFieldsFor("SUCCESS", measured)).toEqual({
+      warningMessage: "疑似导出过早",
+      unexplainedZeroRatio: 0.3,
+    });
+  });
+
+  it("keeps both fields on PARTIAL - some rows landed, so the day is measurable", () => {
+    expect(completenessFieldsFor("PARTIAL", measured)).toEqual({
+      warningMessage: "疑似导出过早",
+      unexplainedZeroRatio: 0.3,
+    });
+  });
+
+  it("drops BOTH fields on FAILED", () => {
+    // A failed import stores nothing, so a completeness warning would send the operator to
+    // re-export a day that has no rows at all. And the ratio series is what will replace
+    // the single-day threshold: a rolled-back file must not weight that calibration.
+    expect(completenessFieldsFor("FAILED", measured)).toEqual({
+      warningMessage: null,
+      unexplainedZeroRatio: null,
+    });
+  });
+
+  it("drops the ratio on FAILED even when the parse genuinely measured one", () => {
+    // The real case: a clean file whose write then threw. The measurement is honest and
+    // still must not be recorded, because the hours behind it were rolled back.
+    expect(completenessFieldsFor("FAILED", { unexplainedZeroRatio: 0 })).toEqual({
+      warningMessage: null,
+      unexplainedZeroRatio: null,
+    });
+  });
+
+  it("records a quiet day's ratio, not just a warned one", () => {
+    // No warning fired, ratio still stored. That series is the whole plan for re-deriving
+    // the 10% threshold from more than the single day it was set from.
+    expect(completenessFieldsFor("SUCCESS", { unexplainedZeroRatio: 0.036 })).toEqual({
+      warningMessage: null,
+      unexplainedZeroRatio: 0.036,
+    });
+  });
+
+  it("normalises through the same guards as a direct write", () => {
+    expect(
+      completenessFieldsFor("SUCCESS", { warningMessage: "   ", unexplainedZeroRatio: Number.NaN }),
+    ).toEqual({ warningMessage: null, unexplainedZeroRatio: null });
   });
 });

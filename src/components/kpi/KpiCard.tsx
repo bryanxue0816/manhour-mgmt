@@ -2,13 +2,16 @@
  * KPI four-card row for the man-hour dashboard (DESIGN.md v18).
  *
  * Renders four shadcn Cards in a responsive grid:
- *   1. actual     - current-month actual hours vs budget (tier-colored bar)
- *   2. planRemain - plan remaining for the month (blue bar + status pill)
- *   3. chalRemain - challenge remaining for the month (green bar + status pill)
- *   4. cumRemain  - cumulative remaining vs plan (red bar)
+ *   1. actual     - current-month actual hours vs budget
+ *   2. planRemain - plan remaining for the month (+ status pill)
+ *   3. chalRemain - challenge remaining for the month (+ status pill)
+ *   4. cumRemain  - cumulative remaining vs plan
  *
- * All colors use brand CSS-variable utilities (bg-plan/bg-actual/bg-challenge/
- * bg-warn) registered in globals.css; no hardcoded hex values.
+ * Each card is a headline figure plus one caption line. The cards carry no
+ * progress bars: two of the four were pinned at 100% and encoded nothing, and
+ * the other two duplicated a percentage that the caption already states in
+ * words. Status pills keep the brand CSS-variable utilities (bg-challenge /
+ * bg-actual) registered in globals.css; no hardcoded hex values.
  */
 import * as React from "react";
 
@@ -20,7 +23,7 @@ import {
 } from "@/components/ui/card";
 import { formatHoursBare } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { KpiData, UsageTier } from "@/types/manhour";
+import type { KpiData } from "@/types/manhour";
 
 /** Which KPI card to render. */
 export type KpiCardVariant = "actual" | "planRemain" | "chalRemain" | "cumRemain";
@@ -34,49 +37,10 @@ export interface KpiRowProps {
   data: KpiData;
 }
 
-/** Budget-usage tier -> brand progress-bar fill color utility. */
-const TIER_BAR_CLASS: Record<UsageTier, string> = {
-  green: "bg-challenge",
-  yellow: "bg-warn",
-  red: "bg-actual",
-};
-
-/** Clamp a percentage into [0, 100] for safe progress-bar widths. Guards
- *  against non-finite values that would break CSS width or ARIA attrs. */
-function clampPct(pct: number): number {
-  if (!Number.isFinite(pct)) return 0;
-  return Math.max(0, Math.min(pct, 100));
-}
-
 /** Format a number with an explicit + sign when positive; negatives keep -. */
 function formatSigned(n: number): string {
   const rounded = Math.round(n);
   return rounded > 0 ? `+${rounded}` : `${rounded}`;
-}
-
-/** Horizontal progress bar: colored fill over a muted track. */
-function ProgressBar({
-  fillClass,
-  pct,
-}: {
-  fillClass: string;
-  pct: number;
-}): React.ReactElement {
-  const safePct = clampPct(pct);
-  return (
-    <div
-      className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
-      role="progressbar"
-      aria-valuenow={Math.round(safePct)}
-      aria-valuemin={0}
-      aria-valuemax={100}
-    >
-      <div
-        className={cn("h-full rounded-full transition-all", fillClass)}
-        style={{ width: `${safePct}%` }}
-      />
-    </div>
-  );
 }
 
 /** Compact status pill: green when `ok`, red otherwise. Uses brand colors
@@ -139,10 +103,6 @@ function KpiCardContent({
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
-          <ProgressBar
-            fillClass={TIER_BAR_CLASS[data.usedTier]}
-            pct={data.usedPct}
-          />
           <p className="text-xs text-muted-foreground">
             预算已用 {data.usedPct}%（计划 {formatHoursBare(data.monthPlan)}）
           </p>
@@ -159,7 +119,6 @@ function KpiCardContent({
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
-          <ProgressBar fillClass="bg-plan" pct={100} />
           <StatusPill ok={ok} okLabel="达成" ngLabel="超支" />
         </>
       );
@@ -174,7 +133,6 @@ function KpiCardContent({
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
-          <ProgressBar fillClass="bg-challenge" pct={100} />
           <StatusPill ok={ok} okLabel="优于挑战" ngLabel="未达挑战" />
         </>
       );
@@ -188,7 +146,6 @@ function KpiCardContent({
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
-          <ProgressBar fillClass="bg-actual" pct={data.cumUsedPct} />
           <p className="text-xs text-muted-foreground">
             距计划 {formatSigned(data.cumRemain)} H
           </p>

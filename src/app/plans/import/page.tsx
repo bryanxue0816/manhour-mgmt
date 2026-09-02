@@ -12,6 +12,7 @@ import type { ReactElement } from "react";
 
 import { PlanImportForm } from "./_components/PlanImportForm";
 import { MainNav } from "@/components/layout/MainNav";
+import { requireAdminPage } from "@/lib/auth-page";
 import { findAllFiscalYears, findCurrentFiscalYear } from "@/lib/db/fiscal-year.repo";
 
 export const dynamic = "force-dynamic";
@@ -33,6 +34,8 @@ function EmptyState(): ReactElement {
 }
 
 export default async function PlanImportPage(): Promise<ReactElement> {
+  await requireAdminPage("/plans/import");
+
   const [years, current] = await Promise.all([
     findAllFiscalYears(),
     findCurrentFiscalYear(),
@@ -46,7 +49,7 @@ export default async function PlanImportPage(): Promise<ReactElement> {
         <div className="mx-auto max-w-full space-y-4 px-6 py-6">
           <div className="flex items-center justify-between gap-6">
             <MainNav active="plans" />
-            <span className="text-xs text-muted-foreground">批量导入 · 内网免登录</span>
+            <span className="text-xs text-muted-foreground">批量导入 · 管理员已登录</span>
           </div>
           <div>
             <h1 className="font-heading text-2xl font-semibold tracking-tight">

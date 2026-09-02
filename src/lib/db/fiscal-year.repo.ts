@@ -138,9 +138,18 @@ export async function upsertFiscalYear(
 /**
  * Clears `isCurrent` on all others then sets it, inside ONE transaction.
  *
- * The transaction is the only thing standing in for the partial unique index
- * SQLite lacks: run as two separate statements, a crash in between leaves either
- * zero or two current years.
+ * The transaction stands in for the partial unique index SQLite lacks: run as two
+ * separate statements, a crash in between leaves either zero or two current years.
+ *
+ * SQLITE-ONLY GUARANTEE - do not carry this assumption to PostgreSQL. The mutual
+ * exclusion here also rests on SQLite's write lock: the first `updateMany` takes
+ * RESERVED, a concurrent transaction gets SQLITE_BUSY, so the two calls serialise.
+ * Under PostgreSQL's default READ COMMITTED they do not. T2's statement snapshot can
+ * predate T1's commit, T2 then sees no current year to clear, and both rows end up
+ * `true` - at which point findCurrentFiscalYear() silently degrades to picking by
+ * `year desc` and the dashboard can read the wrong fiscal year. The PG migration MUST
+ * add the partial unique index that the `[PG]` note in schema.prisma calls for; this
+ * transaction is not a substitute for it.
  *
  * @throws if `id` does not exist - the `update` fails, the whole transaction
  *   rolls back and the previous current year is preserved. Deliberately not

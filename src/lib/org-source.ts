@@ -12,6 +12,7 @@ import "server-only";
 import type { OrgRoot } from "@/types/manhour";
 import { Prisma } from "@/generated/prisma/client";
 import { ORG_MOCK } from "@/lib/mock/org";
+import { findManualBaselineMonthsByFiscalYear } from "@/lib/db/actual.repo";
 import { loadOrgRoot } from "@/lib/db/adapter/load-org";
 import { findCurrentFiscalYear } from "@/lib/db/fiscal-year.repo";
 import { findLatestSuccessfulImportLog } from "@/lib/db/import-log.repo";
@@ -62,6 +63,21 @@ export interface DashboardOrg {
    * screen over a header label.
    */
   importStaleness: ImportStaleness | null;
+  /**
+   * Fiscal months (1 = April) whose actual figures were typed in by hand (D-198).
+   *
+   * The dashboard captions those months rather than presenting them as attendance
+   * output: a manual row carries the whole month in its total with the 人员/加班 split
+   * unavailable, so the chart's personnel and overtime series are an undercount there
+   * while the total is right. Empty on every degraded path, for the same reason
+   * `importStaleness` is null - a provenance note on demo numbers names the wrong
+   * problem.
+   *
+   * Derived from the stored rows, never a literal list of the back-filled months: the
+   * first 8月 import the same way would turn a hard-coded footnote into a false claim
+   * that nothing would catch.
+   */
+  manualBaselineMonths: readonly number[];
 }
 
 /** Parses the flag, treating anything other than an explicit 'db' as 'mock'. */
@@ -141,6 +157,7 @@ export async function loadDashboardOrg(): Promise<DashboardOrg> {
       fiscalYearName: null,
       fiscalYearStartYear: null,
       importStaleness: null,
+      manualBaselineMonths: [],
     };
   }
 
@@ -156,6 +173,7 @@ export async function loadDashboardOrg(): Promise<DashboardOrg> {
         fiscalYearName: null,
         fiscalYearStartYear: null,
         importStaleness: null,
+        manualBaselineMonths: [],
       };
     }
 
@@ -174,6 +192,7 @@ export async function loadDashboardOrg(): Promise<DashboardOrg> {
         fiscalYearName: fiscalYear.name,
         fiscalYearStartYear: null,
         importStaleness: null,
+        manualBaselineMonths: [],
       };
     }
 
@@ -183,10 +202,15 @@ export async function loadDashboardOrg(): Promise<DashboardOrg> {
     // the exact mistake D-158 records. Sequencing costs one round trip against a local
     // file and buys the guarantee that no unguarded promise is left in flight.
     const latestSuccess = await findLatestSuccessfulImportLog();
+    // Same sequencing rule as the line above, and the same reason: this is a caption on
+    // the numbers already loaded, and an unguarded promise in flight beside them is the
+    // exact mistake D-158 records.
+    const manualBaselineMonths = await findManualBaselineMonthsByFiscalYear(fiscalYear.id);
 
     return {
       org,
       source: "db",
+      manualBaselineMonths,
       fiscalYearName: fiscalYear.name,
       fiscalYearStartYear: fiscalYear.year,
       importStaleness: describeImportStaleness(
@@ -210,6 +234,7 @@ export async function loadDashboardOrg(): Promise<DashboardOrg> {
       fiscalYearName: null,
       fiscalYearStartYear: null,
       importStaleness: null,
+      manualBaselineMonths: [],
     };
   }
 }

@@ -45,6 +45,7 @@ import {
   recordMasterDataSnapshot,
   writeMasterDataWithAudit,
 } from "@/lib/db/master-data-change-log.repo";
+import { REASON_MAX_LENGTH } from "@/lib/db/reason";
 
 // --------------------------------------------------------------------------------
 // Fake store
@@ -345,6 +346,58 @@ describe("recordMasterDataSnapshot", () => {
   });
 });
 
+describe("recordMasterDataSnapshot - the optional reason (D-184)", () => {
+  /** One snapshot row with `reason` set to whatever the caller passed. */
+  async function record(reason?: string | null): Promise<Row | undefined> {
+    await runInTransaction(db, (tx) =>
+      recordMasterDataSnapshot(tx, {
+        entity: "organization",
+        action: "update",
+        targetKey: "検査课",
+        reason,
+      }),
+    );
+    return db.log[0];
+  }
+
+  it("stores a trimmed reason", async () => {
+    const row = await record("  组织调整 2026H2  ");
+
+    expect(row?.reason).toBe("组织调整 2026H2");
+  });
+
+  it.each([
+    ["omitted", undefined],
+    ["null", null],
+    ["empty", ""],
+    ["whitespace-only", "   "],
+  ])("stores null when the reason is %s", async (_label, reason) => {
+    // Second half of the contract normaliseReason exists for: if "" were stored, then
+    // `reason IS NOT NULL` would stop meaning "this change came with an explanation".
+    const row = await record(reason);
+
+    expect(row?.reason).toBeNull();
+  });
+
+  it("accepts a reason at exactly the length limit", async () => {
+    const atLimit = "由".repeat(REASON_MAX_LENGTH);
+
+    const row = await record(atLimit);
+
+    expect(row?.reason).toBe(atLimit);
+  });
+
+  it("refuses an over-long reason instead of truncating it", async () => {
+    // The column is a plain String with no database-level limit, so this guard is the
+    // only thing standing between a non-UI caller and an unbounded write. Refusing
+    // rather than truncating: a half-sentence in an audit trail is worse than none.
+    await expect(record("由".repeat(REASON_MAX_LENGTH + 1))).rejects.toThrow(
+      /reason exceeds 200 characters/,
+    );
+    expect(db.log).toHaveLength(0);
+  });
+});
+
 describe("writeMasterDataWithAudit", () => {
   it("commits the write, its baseline and its snapshot as one unit", async () => {
     const written = await writeMasterDataWithAudit(
@@ -395,5 +448,31 @@ describe("writeMasterDataWithAudit", () => {
     // Not even the baseline survives: a trail that records a rejected edit is as
     // misleading as one that misses a successful edit.
     expect(db.log).toHaveLength(0);
+  });
+
+  it("puts the reason on the snapshot only, never on the baseline (D-184)", async () => {
+    await writeMasterDataWithAudit(
+      "organization",
+      async (tx) => tx.section.update({ where: { id: "s1" }, data: { sortOrder: 99 } }),
+      (row) => ({ action: "update", targetKey: String(row.name), reason: "组织调整" }),
+    );
+
+    // The baseline describes the state before anybody had a chance to explain anything,
+    // so attaching this edit's reason to it would credit an earlier state with a
+    // justification that was written for a later one.
+    expect(db.log.map((row) => [row.action, row.reason])).toEqual([
+      ["baseline", null],
+      ["update", "组织调整"],
+    ]);
+  });
+
+  it("stores null when the describe callback returns no reason", async () => {
+    await writeMasterDataWithAudit(
+      "organization",
+      async (tx) => tx.section.update({ where: { id: "s1" }, data: { sortOrder: 99 } }),
+      (row) => ({ action: "update", targetKey: String(row.name) }),
+    );
+
+    expect(db.log.map((row) => row.reason)).toEqual([null, null]);
   });
 });

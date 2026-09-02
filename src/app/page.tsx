@@ -20,6 +20,7 @@ import { loadDashboardOrg } from "@/lib/org-source";
 import { MainNav } from "@/components/layout/MainNav";
 import { DashboardClient } from "./_components/DashboardClient";
 import { ImportStalenessBanner } from "./_components/ImportStalenessBanner";
+import { ManualBaselineNote } from "./_components/ManualBaselineNote";
 
 export const dynamic = "force-dynamic";
 
@@ -31,8 +32,14 @@ export default async function Home(): Promise<ReactElement> {
   // exactly as designed, then the unguarded sibling read rejected and 500'd the
   // whole dashboard over a header label. Verified by pointing DATABASE_URL at a
   // nonexistent directory.
-  const { org, source, fiscalYearName, fiscalYearStartYear, importStaleness } =
-    await loadDashboardOrg();
+  const {
+    org,
+    source,
+    fiscalYearName,
+    fiscalYearStartYear,
+    importStaleness,
+    manualBaselineMonths,
+  } = await loadDashboardOrg();
 
   // A fallback must never look like live data. Mock and seed agree on 财务课
   // April plan (both 1045), so without this marker a degraded page is
@@ -50,7 +57,18 @@ export default async function Home(): Promise<ReactElement> {
       // policy - which is also why it is null whenever the tree degraded to the mock:
       // 「从未成功导入」 stamped on demo numbers would name the wrong problem, and the
       // 「· 演示数据」 label already names the right one.
-      banner={<ImportStalenessBanner staleness={importStaleness} />}
+      // Two server-rendered strips through the one slot, which the prop is documented to
+      // allow. Staleness first: "数据缺了几天" is actionable and 手工基线 is not, so the
+      // one with a fix goes above the one that is merely a caveat.
+      banner={
+        <>
+          <ImportStalenessBanner staleness={importStaleness} />
+          <ManualBaselineNote
+            months={manualBaselineMonths}
+            fiscalYearStartYear={fiscalYearStartYear}
+          />
+        </>
+      }
       // Null when the tree is the mock: its months are FY2026 fixtures, so the
       // client falls back to the hard-coded FY2026 labels rather than dating demo
       // data with a real year (D-165).

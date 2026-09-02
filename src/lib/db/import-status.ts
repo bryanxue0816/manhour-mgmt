@@ -53,7 +53,8 @@ export function assertImportTrigger(value: string): ImportTrigger {
 export const MAX_ERROR_MESSAGE_LENGTH = 2000;
 
 /**
- * Trims an error summary to something a status panel can render.
+ * Trims a stored note to something a status panel can render. Used for both
+ * `errorMessage` and D-222's `warningMessage` - same column type, same rendering budget.
  *
  * Blank (or whitespace-only) becomes null so "no error" has exactly one representation:
  * an empty string in this column would make `errorMessage IS NOT NULL` report a failure
@@ -66,4 +67,45 @@ export function normaliseErrorMessage(raw: string | null | undefined): string | 
   return trimmed.length <= MAX_ERROR_MESSAGE_LENGTH
     ? trimmed
     : `${trimmed.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…（已截断）`;
+}
+
+/**
+ * Narrows a measured ratio to a stored 0..1 Float, or null.
+ *
+ * NaN and Infinity become null rather than being stored. A NaN in this column would
+ * survive every comparison as false, so a later threshold re-derivation would read it as
+ * a healthy day instead of as a missing measurement - the one outcome worse than no data.
+ * Out-of-range values are clamped rather than dropped: the measurement is still evidence.
+ */
+export function normaliseRatio(raw: number | null | undefined): number | null {
+  if (raw === null || raw === undefined) return null;
+  if (!Number.isFinite(raw)) return null;
+  return Math.min(1, Math.max(0, raw));
+}
+
+/**
+ * The D-222 completeness pair as it must be STORED, given the status the row landed with.
+ *
+ * Both fields are dropped on FAILED. The warning would point an operator at a completeness
+ * problem in a day that has no rows at all - a failed import stores nothing, its writes are
+ * rolled back in one transaction. And the ratio is the series meant to replace D-222's
+ * single-day threshold, so it has to describe days that actually landed: a rolled-back file
+ * would weight the calibration with hours nobody can read.
+ *
+ * Here rather than inline in `import-log.repo.ts` for the reason that module note gives for
+ * this whole file: the repo builds its Prisma client at import time, so a rule expressed
+ * there cannot be asserted without better-sqlite3 and DATABASE_URL. This is an invariant
+ * worth a test, not a line worth trusting.
+ */
+export function completenessFieldsFor(
+  status: ImportStatus,
+  input: { warningMessage?: string | null; unexplainedZeroRatio?: number | null },
+): { warningMessage: string | null; unexplainedZeroRatio: number | null } {
+  if (status === "FAILED") {
+    return { warningMessage: null, unexplainedZeroRatio: null };
+  }
+  return {
+    warningMessage: normaliseErrorMessage(input.warningMessage),
+    unexplainedZeroRatio: normaliseRatio(input.unexplainedZeroRatio),
+  };
 }

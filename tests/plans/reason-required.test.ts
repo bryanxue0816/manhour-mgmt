@@ -8,11 +8,18 @@
 // module load, so the repositories are mocked here: the point of these tests is the
 // boundary check, and a unit test must not need a database to prove it.
 //
+// A valid admin session is granted in beforeEach because both actions call requireAdmin()
+// first (2026-08-17). Without it every case below would return 需要管理员权限 and pass for
+// the wrong reason - the reason checks would never run. tests/security/action-gates.test.ts
+// is where the ABSENT session is asserted.
+//
 // The load-bearing assertion in every rejection case is NOT the message - it is that
 // the write function was never called. A boundary that returns the right text and
 // writes anyway would pass a message-only test while failing the requirement.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { grantAdminSession } from "../helpers/admin-session";
 
 const mocks = vi.hoisted(() => ({
   upsertPlanWithAudit: vi.fn(),
@@ -21,7 +28,10 @@ const mocks = vi.hoisted(() => ({
   findFiscalYearById: vi.fn(),
   loadOrgSnapshot: vi.fn(),
   revalidatePath: vi.fn(),
+  cookieGet: vi.fn<(name: string) => { name: string; value: string } | undefined>(),
 }));
+
+vi.mock("next/headers", () => ({ cookies: async () => ({ get: mocks.cookieGet }) }));
 
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
 
@@ -56,6 +66,9 @@ function validInput(overrides: Partial<SavePlanCellInput> = {}): SavePlanCellInp
 }
 
 beforeEach(() => {
+  mocks.cookieGet.mockReset();
+  grantAdminSession(mocks.cookieGet);
+
   mocks.upsertPlanWithAudit.mockResolvedValue({
     planId: "plan-1",
     created: false,

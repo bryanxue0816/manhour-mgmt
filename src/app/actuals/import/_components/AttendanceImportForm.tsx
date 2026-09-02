@@ -110,6 +110,48 @@ function RejectedList({
   );
 }
 
+/**
+ * D-222 banner: the files whose rows are valid but look like they were exported before the
+ * clock machines finished syncing.
+ *
+ * Separate from RejectedList and from the FAILED styling on purpose. A rejected file needs
+ * a different action (fix or drop the file); this one needs the operator to go back to HR
+ * and ask for a later export. Collapsing the two into one "problems" box would have the
+ * operator re-uploading the same too-early file.
+ *
+ * Shown in the preview AND after the commit. Only the preview can still prevent the write,
+ * but the warning is not a block (只告警不拦截) - the rows are real and re-importing the
+ * same day overwrites them - so the post-commit copy is what tells an operator who clicked
+ * through that there is still something to do.
+ */
+function CompletenessWarnings({
+  files,
+}: {
+  files: readonly { fileName: string; warning: string | null }[];
+}): ReactElement | null {
+  const warned = files.filter(
+    (file): file is { fileName: string; warning: string } => file.warning !== null,
+  );
+  if (warned.length === 0) {
+    return null;
+  }
+  return (
+    <div role="alert" className="space-y-2 rounded-lg bg-warn/10 p-4 ring-1 ring-warn/40">
+      <p className="text-sm font-medium text-foreground">
+        {warned.length} 个文件疑似导出过早，工时可能不完整
+      </p>
+      <ul className="space-y-1.5 text-sm text-foreground">
+        {warned.map((file) => (
+          <li key={file.fileName} className="leading-relaxed">
+            <span className="font-medium">{file.fileName}</span>
+            <span className="mt-0.5 block text-muted-foreground">{file.warning}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /** Human-readable date range for one file's 出勤日期 set. */
 function describeWorkDates(workDates: readonly string[]): string {
   if (workDates.length === 0) {
@@ -201,9 +243,17 @@ export function AttendanceImportForm(): ReactElement {
       if (result.ok) {
         setPreview(result.preview);
         const rows = result.preview.files.reduce((sum, file) => sum + file.rowCount, 0);
-        toast.success(
-          `已检查 ${String(result.preview.files.length)} 个文件，共 ${String(rows)} 行待写入`,
-        );
+        const warned = result.preview.files.filter((file) => file.warning !== null).length;
+        // A D-222 file parses cleanly and carries the right row count, so the success toast
+        // would be literally true and still misleading. Escalate it: the toast is the only
+        // part of this screen an operator is guaranteed to look at.
+        if (warned > 0) {
+          toast.warning(`${String(warned)} 个文件疑似导出过早，工时可能不完整，请看下方提示`);
+        } else {
+          toast.success(
+            `已检查 ${String(result.preview.files.length)} 个文件，共 ${String(rows)} 行待写入`,
+          );
+        }
       } else {
         setPreview(null);
         setError(result.message);
@@ -239,15 +289,26 @@ export function AttendanceImportForm(): ReactElement {
         if (fileInputRef.current !== null) {
           fileInputRef.current.value = "";
         }
-        if (result.summary.succeeded === result.summary.files.length) {
-          toast.success(
-            `导入完成：${String(result.summary.files.length)} 个文件，` +
-              `写入 ${String(result.summary.rowsStored)} 行`,
-          );
-        } else {
+        const warned = result.summary.files.filter((file) => file.warning !== null).length;
+        // Failure first, then the D-222 warning, then success. One toast slot, and the
+        // ordering is by what the operator must do: a file that did not land needs
+        // re-uploading, which outranks a file that landed short.
+        if (result.summary.succeeded !== result.summary.files.length) {
           toast.warning(
             `导入部分完成：${String(result.summary.succeeded)}/` +
               `${String(result.summary.files.length)} 个文件成功，请查看下方明细`,
+          );
+        } else if (warned > 0) {
+          // Same reasoning as the preview toast, but the rows are already stored: the point
+          // is no longer "reconsider", it is "this day still needs a re-export".
+          toast.warning(
+            `导入完成，但 ${String(warned)} 个文件疑似导出过早，` +
+              `工时可能不完整，请重新导出后再上传`,
+          );
+        } else {
+          toast.success(
+            `导入完成：${String(result.summary.files.length)} 个文件，` +
+              `写入 ${String(result.summary.rowsStored)} 行`,
           );
         }
       } else {
@@ -270,14 +331,14 @@ export function AttendanceImportForm(): ReactElement {
       <section className="space-y-4 rounded-lg bg-card p-5 ring-1 ring-border">
         <div className="space-y-1.5">
           <label htmlFor={fileFieldId} className="block text-sm font-medium">
-            日考勤数据文件（.xls / .xlsx，可多选）
+            日考勤数据文件（.csv / .xls / .xlsx，可多选）
           </label>
           <input
             ref={fileInputRef}
             id={fileFieldId}
             type="file"
             multiple
-            accept=".xls,.xlsx"
+            accept=".csv,.xls,.xlsx"
             disabled={busy !== "idle"}
             onChange={onFileChange}
             aria-invalid={error !== null ? true : undefined}
@@ -326,6 +387,7 @@ export function AttendanceImportForm(): ReactElement {
             </p>
           </div>
           <RejectedList rejected={summary.rejected} />
+          <CompletenessWarnings files={summary.files} />
           {summary.files.length === 0 ? null : (
             <ul className="space-y-2">
               {summary.files.map((file) => (
@@ -341,6 +403,9 @@ export function AttendanceImportForm(): ReactElement {
                     {file.isRestDay
                       ? "休日报表：无员工数据行，已按 0 行记录"
                       : `写入 ${String(file.rowsStored)} 行`}
+                    {file.categoryFilteredRows === 0
+                      ? ""
+                      : ` · 另有 ${String(file.categoryFilteredRows)} 行不属于管理职 / 管间人员，未纳入管间工时`}
                     {file.monthLabels.length === 0
                       ? ""
                       : ` · 重算月份 ${file.monthLabels.join("、")}`}
@@ -383,6 +448,7 @@ export function AttendanceImportForm(): ReactElement {
           </div>
 
           <RejectedList rejected={preview.rejected} />
+          <CompletenessWarnings files={preview.files} />
 
           {preview.needsReimportConfirmation ? (
             <div className="space-y-2 rounded-lg bg-warn/10 p-4 ring-1 ring-warn/40">
@@ -420,7 +486,7 @@ export function AttendanceImportForm(): ReactElement {
                     判定
                   </th>
                   <th scope="col" className="px-3 py-2 text-right font-semibold">
-                    行数
+                    行数（管间）
                   </th>
                   <th scope="col" className="px-3 py-2 text-left font-semibold">
                     出勤日期
@@ -438,6 +504,12 @@ export function AttendanceImportForm(): ReactElement {
                       {file.alreadyImported ? (
                         <span className="mt-0.5 block text-xs text-warn">已导入过</span>
                       ) : null}
+                      {file.warning === null ? null : (
+                        // Marker only - the sentence itself is in the banner above. Repeating
+                        // the full text in a table cell would push 行数 and 出勤日期 off the
+                        // row, and those are what the operator scans to spot the wrong day.
+                        <span className="mt-0.5 block text-xs text-warn">疑似导出过早</span>
+                      )}
                       {file.message === null ? null : (
                         <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
                           {file.message}
@@ -452,7 +524,19 @@ export function AttendanceImportForm(): ReactElement {
                         </span>
                       ) : null}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums">{file.rowCount}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {file.rowCount}
+                      {file.categoryFilteredRows === 0 ? null : (
+                        // The subtraction, not just its result. HR exports the whole plant and
+                        // this system counts two of the three 员工类别 (D-103), so a 577-row
+                        // file previewing as 180 reads as data loss unless the row says where
+                        // the other 397 went - and an operator who reads it that way cancels a
+                        // correct import.
+                        <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
+                          不计 {file.categoryFilteredRows} 行
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 text-muted-foreground">
                       {describeWorkDates(file.workDates)}
                     </td>

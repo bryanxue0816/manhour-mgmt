@@ -110,15 +110,25 @@ export async function countWorkingDays(from: Date, to: Date): Promise<number> {
 
 /**
  * Creates or updates one calendar day.
- * @throws if `input.date` is not a calendar day at UTC midnight.
+ *
+ * `dayType` is validated on the way IN, not only on the way out. It types as DayType,
+ * but the import path builds it from spreadsheet text and one `as DayType` is enough
+ * to store anything; SQLite has no enum to stop it. An accepted typo does not fail
+ * where it was written - it makes findCalendarRange() throw for EVERY range covering
+ * that day, while countWorkingDays() (a DB `count`, no DTO) just quietly counts one
+ * day short. Two unrelated-looking symptoms, one bad row. Reject it at the door.
+ *
+ * @throws if `input.date` is not a calendar day at UTC midnight, or `input.dayType`
+ *   is outside the known set.
  */
 export async function upsertCalendarDay(input: WorkCalendarUpsertInput): Promise<void> {
   const date = assertCalendarDay(input.date);
+  const dayType = assertDayType(input.dayType);
   await prisma.workCalendar.upsert({
     where: { date },
-    create: { date, dayType: input.dayType, remark: input.remark ?? null },
+    create: { date, dayType, remark: input.remark ?? null },
     // `remark: undefined` leaves an existing remark untouched; null clears it.
-    update: { dayType: input.dayType, remark: input.remark },
+    update: { dayType, remark: input.remark },
   });
 }
 
@@ -130,18 +140,19 @@ export async function upsertCalendarDay(input: WorkCalendarUpsertInput): Promise
  * `createMany({ skipDuplicates })` and calendar imports must be idempotent, since a
  * whole year is typically re-uploaded to fix a handful of holidays.
  *
- * Every date is validated BEFORE the transaction opens, matching upsertPlansBulk().
- * Validating inside the loop would make the failure point depend on input order and
- * would pay for a partial write that then rolls back.
+ * Every date AND dayType is validated BEFORE the transaction opens, matching
+ * upsertPlansBulk(). Validating inside the loop would make the failure point depend on
+ * input order and would pay for a partial write that then rolls back.
  *
- * @throws if any input's date is not a calendar day at UTC midnight - nothing is
- *   written.
+ * @throws if any input's date is not a calendar day at UTC midnight, or any dayType is
+ *   outside the known set - nothing is written.
  */
 export async function upsertCalendarBulk(
   inputs: readonly WorkCalendarUpsertInput[],
 ): Promise<number> {
   for (const input of inputs) {
     assertCalendarDay(input.date);
+    assertDayType(input.dayType);
   }
   if (inputs.length === 0) return 0;
   return prisma.$transaction(async (tx) => {

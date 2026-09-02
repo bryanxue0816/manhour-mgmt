@@ -1,122 +1,180 @@
-# 部署手册 — 工时管理系统（SQLite 版）
+# 部署手册 — 工时管理系统
 
-> **适用范围**：内网自部署（D-007），免登录 + IP 白名单（D-008），SQLite 单文件数据库。
-> PostgreSQL 迁移属于后续批次 5B，本文档不涉及。
+> **怎么用这份文档**：从上往下，一步一步做。每步都有「**做什么**（可直接复制的命令）→ **应该看到什么** → **如果不对怎么办**」。
+> **不要跳步**，尤其是第 4 步（口令）、第 5 步（网段）、第 9 步（验证）——这三步做错都**不会报错**，系统看起来完全正常。
+>
+> 还没拿到服务器？先看 [`SERVER_REQUIREMENTS.md`](SERVER_REQUIREMENTS.md)（申请服务器要写什么、需要 IT 回填的 14 项）。
 
 ---
 
-## ⚠️ 本文档的验证状态（先读这一段）
+## 第 0 步：先知道三件事（2 分钟，别跳）
 
-| 内容 | 验证状态 |
+### ① 这套东西从没在真机上跑过
+
+| 内容 | 状态 |
 | --- | --- |
-| `next build` → `node server.js` → 7 路由 200 | ✅ 本机实跑通过 |
-| `scripts/backup-db.mjs` 备份 + 完整性校验 + 恢复演练 | ✅ 真库实跑通过（9 项） |
-| `prisma migrate deploy`（已有库 / 空库）、`prisma db seed` | ✅ 隔离包集下实跑 EXIT=0 |
-| `Dockerfile` 镜像构建 | ❌ **从未构建过** |
-| `docker-compose.prod.yml` | ⚠️ 仅 YAML 解析通过，从未 `up` 过 |
-| `nginx.conf` | ❌ **从未被 nginx 加载过**，`nginx -t` 未跑 |
+| 应用本体（构建、7 个页面、备份与恢复、自动化测试） | ✅ 开发机实跑通过 |
+| 数据库迁移与初始数据 | ✅ 实跑通过 |
+| **Docker 镜像构建** | ❌ **一次都没构建过** |
+| **docker-compose 启动** | ⚠️ 只检查过格式，从没启动过 |
+| **nginx 配置** | ❌ **从没被 nginx 加载过** |
 
-**原因**：编写本系统的机器上没有安装 Docker，也没有 nginx。容器相关文件的每一条指令都有实测依据（见文件内注释），但整体从未跑通。**首次部署请预留调试时间，不要安排在业务窗口内。**
+原因很简单：写这套系统的电脑上没装 Docker，也没装 nginx。文件里每条指令都有依据，但整体没跑通过。
 
-首次部署建议按顺序单独验证，而不是一次 `up -d`：
+> **所以：首次部署请预留半天，不要安排在业务时间。** 别指望一次成功。
+
+### ② 这个系统坏掉的时候，看起来是好的
+
+这是本项目**最重要的一句话**。数据库连不上时，页面**照常打开、状态码 200、图表上有数字**——只不过那些数字是假的演示数据。
+
+唯一的破绽：首页财年标签后面会多出 `· 演示数据` 四个字。
+
+> 因此**「网页能打开」不等于部署成功**。第 9 步的验证不能省。也因此本项目**故意没写 Docker 健康检查**——一个必然报绿的检查比没有检查更糟。
+
+### ③ 需要的命令基础
+
+如果你不熟 Docker，只需要认识这几个词：
+
+| 词 | 大白话 |
+| --- | --- |
+| 镜像（image） | 打包好的程序，像一张安装盘 |
+| 容器（container） | 镜像跑起来之后的进程，像装好并运行中的软件 |
+| `build` | 造安装盘 |
+| `up -d` | 后台启动 |
+| `exec app <命令>` | 钻进正在运行的容器里执行一条命令 |
+| bind mount | 把服务器上的一个真实文件夹「借」给容器用；容器删了，文件还在 |
+
+本文所有命令都在 `/opt/manhour-mgmt/app` 这个目录下执行（路径按你的实际情况替换）。
+
+---
+
+## 部署前：把这张表填好
+
+从 IT 那里拿到的信息先填在这里，后面几步会反复用到：
+
+| 项 | 值 | 用在 |
+| --- | --- | --- |
+| 服务器内网 IP | `_______________` | 第 5、9 步 |
+| 代码存放路径 | `/opt/manhour-mgmt/app` | 全部步骤 |
+| 允许访问的办公网段 | `_______________`（如 `10.20.30.0/24`） | 第 5 步 |
+| 协议是 HTTP 还是 HTTPS | ☐ HTTP ☐ HTTPS | 第 4 步 |
+| HR 共享目录 UNC 路径 | `_______________` | 第 10 步 |
+
+---
+
+## 第 1 步：把代码放到服务器上
+
+**做什么**
 
 ```bash
-docker compose -f docker-compose.prod.yml config    # 只解析，不启动
-docker compose -f docker-compose.prod.yml build     # 只构建 app 镜像
-docker run --rm -v "$PWD/nginx.conf:/etc/nginx/nginx.conf:ro" nginx:1.27-alpine nginx -t
+# 方式一：服务器能连内网 git 仓库
+sudo mkdir -p /opt/manhour-mgmt
+cd /opt/manhour-mgmt
+git clone <仓库地址> app
+cd app
+
+# 方式二：服务器连不了仓库，用压缩包拷进去
+# 在开发机打包（排除大文件），再上传解压到 /opt/manhour-mgmt/app
 ```
 
+**应该看到**：`ls` 能看到 `Dockerfile`、`docker-compose.prod.yml`、`nginx.conf`、`package.json`、`prisma/`。
+
+**如果不对**：确认解压层级，别多套一层目录（`app/app/Dockerfile` 是错的）。
+
 ---
 
-## 1. 三个致命陷阱
+## 第 2 步：确认 Docker 装好了
 
-这三条是本项目特有的失败模式，**每一条都表现为「系统看起来完全正常」**。放在最前面，因为它们比任何部署步骤都重要。
-
-### 陷阱 1：数据库连不上时，页面返回 HTTP 200 并展示假数据
-
-`src/lib/org-source.ts` 会把数据库异常归类为「基础设施故障」，然后降级到 Phase 1 的内存演示数据。**页面正常渲染、状态码 200、图表有数字** —— 唯一的线索是首页财年标签后面多了 `· 演示数据`（`src/app/page.tsx:62`）。
-
-因此：
-
-- **任何只看状态码的健康检查都会把坏掉的部署判定为正常。** 这也是 `Dockerfile` 和 compose 文件里刻意**不写 HEALTHCHECK** 的原因 —— 一个必然报绿的检查比没有检查更有害。
-- 正确的检查方式见 [§6 健康检查](#6-健康检查必须做)。
-
-### 陷阱 2：`DATABASE_URL` 用相对路径 → 静默创建空库 → 触发陷阱 1
-
-standalone 的 `server.js` 启动时执行 `process.chdir(__dirname)`。相对路径 `file:./dev.db` 会相对于 server 目录解析，better-sqlite3 **不会报错，而是新建一个 0 字节文件**，Prisma 随后抛 `P2021`（表不存在），然后进入陷阱 1。
-
-**`DATABASE_URL` 必须是绝对路径。** 容器内固定为 `file:/app/data/dev.db`。
-
-### 陷阱 3：bind mount 权限不对 → 写入失败 → 触发陷阱 1
-
-容器以 uid 1000（`node` 用户）运行。宿主机的 `./data` 目录若不可被 uid 1000 写入，SQLite 打开写事务失败，再次落入陷阱 1。
-
-bind mount 会**覆盖**镜像里的目录并沿用宿主机的属主，所以 `Dockerfile` 里的 `chown` 在这种情况下不起作用 —— **必须在宿主机上处理**：
+**做什么**
 
 ```bash
+docker --version
+docker compose version
+```
+
+**应该看到**：Docker 版本 ≥ 24；第二条能打印出 `Docker Compose version v2.x`。
+
+**如果不对**
+
+- `docker compose version` 报「不是 docker 命令」→ 装的是老版 `docker-compose`（v1）。本项目的编排文件按 v2 写的，请让 IT 装 v2 插件。
+- 提示权限不足 → 你的账号不在 `docker` 组：`sudo usermod -aG docker $USER`，然后**重新登录 SSH**（不重登不生效）。
+
+---
+
+## 第 3 步：建两个文件夹，并改属主
+
+**为什么**：容器内部是用 uid 1000 这个普通用户跑的。如果文件夹属主不对，数据库写不进去 → 直接触发第 0 步②那个「假数据」问题。
+
+**做什么**
+
+```bash
+cd /opt/manhour-mgmt/app
 mkdir -p data backups
 sudo chown -R 1000:1000 data backups
+ls -ln | grep -E 'data|backups'
 ```
 
----
+**应该看到**：两行的属主都是 `1000 1000`。
 
-## 2. 部署产物清单
-
-全部位于 `app/` 目录（同时也是 git 仓库根和 Docker 构建上下文根）：
-
-| 文件 | 作用 |
-| --- | --- |
-| `Dockerfile` | 三阶段构建（deps / builder / runner），Node 24.15.0 + bookworm-slim |
-| `.dockerignore` | 排除 `node_modules`、`*.db`、`.env` 等；**必需**，见 §3 |
-| `docker-compose.prod.yml` | app + nginx 两个服务 |
-| `nginx.conf` | 反向代理 + D-008 IP 白名单 |
-| `.env.production.example` | 环境变量模板（需复制为 `.env.production`） |
-| `scripts/backup-db.mjs` | SQLite 备份（`VACUUM INTO` + 完整性校验 + 行数比对 + 保留策略） |
-
----
-
-## 3. 为什么 `.dockerignore` 是必需的，而不是优化项
-
-两个实测理由：
-
-1. **体积**：`node_modules` 是 929.5 MB / 50,991 个文件。不排除的话每次 `docker build` 都要把它们打包上传给 daemon。
-2. **正确性（更要紧）**：宿主机上的 `.node` 原生模块是 **Windows PE 格式**（`better_sqlite3.node`、`sharp-win32-x64-0.35.3.node`，magic `4d5a9000`）。一旦泄漏进构建上下文，会覆盖镜像里正确的 Linux ELF 二进制，运行时报 `invalid ELF header` —— 这个报错看起来像镜像损坏，极难定位真因。
-
-另外注意：`.dockerignore` 的匹配使用 Go 的 `filepath.Match`，**只匹配单层路径**。写 `*.db` 只能匹配根目录，`prisma/dev.db` 会照样被打包进去（真实的考勤数据泄漏进镜像层）。所有数据类模式都必须写成 `**/` 形式。
-
----
-
-## 4. 首次部署
-
-### 4.1 宿主机准备
-
-```bash
-cd /opt/manhour-mgmt/app          # 代码所在目录，路径按实际调整
-
-mkdir -p data backups
-sudo chown -R 1000:1000 data backups     # 陷阱 3
+```
+drwxr-xr-x 2 1000 1000 4096 ... backups
+drwxr-xr-x 2 1000 1000 4096 ... data
 ```
 
-### 4.2 配置环境变量
+**如果不对**：显示 `root root` 就是 `chown` 没生效，重新执行。**这一步不能靠 Dockerfile 解决**——bind mount 会覆盖镜像里的目录并沿用服务器上的属主。
+
+---
+
+## 第 4 步：填配置文件（含口令）
+
+**做什么**
 
 ```bash
 cp .env.production.example .env.production
+vi .env.production
 ```
 
-`.env.production` 里只有两个变量需要确认（代码实际读取的环境变量只有 `DATABASE_URL`、`ORG_DATA_SOURCE`、`NODE_ENV` 三个，`NODE_ENV` 和 `TZ` 由 compose 注入）：
+一共只有 **5 个**要确认（其他都是注释）：
 
+| 变量 | 填什么 | 填错的后果 |
+| --- | --- | --- |
+| `DATABASE_URL` | `file:/app/data/dev.db` | **必须是这个绝对路径**，改成相对路径会静默新建空库 → 假数据 |
+| `ORG_DATA_SOURCE` | `db` | 填成 `mock` → 永远显示演示数据 |
+| `ADMIN_PASSWORD` | 你自己想一个，**手工敲进去** | 留空 → 管理员进不去（不是谁都能进，方向是安全的） |
+| `SESSION_SECRET` | 一串 ≥32 位的随机字符 | 太短或留空 → **所有人**都登不进去 |
+| `COOKIE_SECURE` | HTTP 填 `false`；HTTPS 填 `true` | **HTTP 却填 true → 口令输对了却一直跳回登录页，且日志里毫无报错** |
+
+生成一个随机 `SESSION_SECRET`：
+
+```bash
+openssl rand -base64 48
 ```
-DATABASE_URL="file:/app/data/dev.db"     # 绝对路径，通常无需修改
-ORG_DATA_SOURCE=db                       # 生产必须是 db，不能是 mock
+
+**应该看到**：只核对长度，**不要把口令 echo 出来**：
+
+```bash
+awk -F= '/^ADMIN_PASSWORD=/{print "ADMIN_PASSWORD 长度:", length($2)}' .env.production
+awk -F= '/^SESSION_SECRET=/{print "SESSION_SECRET 长度:", length($2)}' .env.production
 ```
 
-`.env.production` 已在 `.gitignore` 中，不会被提交。
+`SESSION_SECRET` 长度必须 ≥32。
 
-### 4.3 ⚠️ 修改 IP 白名单（这是本系统唯一的访问控制，且漏改不会报错）
+> **口令只存在于服务器上的这个文件里。** 不要写进任何会提交到仓库的文件、不要贴进工单或邮件、不要 echo 到终端历史里。`.env.production` 已在 `.gitignore` 中。
+> **忘了口令没有找回途径，只能改**（改法见「日常操作 · 换口令」）。能登服务器读这个文件的人 = 知道口令的人，口令的安全上限就是服务器的 SSH 权限。
 
-**这一步没有任何自动保护。** 提交进仓库的默认值是刻意保持「放通」的（D-171 已确认此选择），所以漏改 allow 段的表现是**系统完全正常运行、没有报错、没有提示、健康检查也报绿** —— 唯一的后果是访问范围远大于预期。本节是该风险的全部缓解措施，请勿跳过。
+---
 
-`nginx.conf` 里的 allow 段目前是 **RFC 1918 占位值**，不是目标网段：
+## 第 5 步：改访问网段（漏改不会报错）
+
+**为什么**：仓库里 `nginx.conf` 的默认值是**放通几乎所有私有网段**的占位值。漏改的表现是：系统完全正常、没有任何报错、健康检查报绿——只是谁都能看到全公司的工时数据。**本步是这个风险的唯一防线。**
+
+**做什么**
+
+```bash
+vi nginx.conf
+```
+
+找到这几行（默认值，是占位值不是目标值）：
 
 ```nginx
 allow 127.0.0.1;
@@ -126,200 +184,428 @@ allow 192.168.0.0/16;
 deny  all;
 ```
 
-**原样部署等于放通几乎所有私有网段。** 系统没有登录，任何通过白名单的人都能读取并**修改**全部考勤与计划数据，包括 `/admin` 页面。请替换为实际办公网段，例如：
+改成你实际的办公网段：
 
 ```nginx
 allow 127.0.0.1;
-allow 10.20.30.0/24;
+allow 10.20.30.0/24;      # ← 换成 IT 给你的网段
 deny  all;
 ```
 
-`deny all` 必须放最后 —— nginx 自上而下匹配，命中即停止。
+`deny all` **必须在最后一行**——nginx 从上往下匹配，命中就停。
 
-**改完必须实测，不能只靠肉眼核对配置。** 网段写错一位（`/24` 写成 `/16`、网段号打错）在配置文件里看不出来，`nginx -t` 也照样通过 —— 它只校验语法，不校验你写的网段是不是你想要的那个。
+**应该看到**：这一步没法立刻验证，要等第 9 步用两台机器实测。
+
+**如果不对**：网段写宽一位（`/24` 写成 `/16`）在文件里根本看不出来，`nginx -t` 也照样通过——它只检查语法，不检查你写的网段对不对。**只能靠第 9 步实测。**
+
+> 如果贵司明确决定「不做 IP 限制、放通全私有网段」，那就保留默认值，但**请不要对使用方说「已按 IP 限制访问」**。这种情况下真正的防线只有口令（看板页是公开只读的）。
+
+---
+
+## 第 6 步：分三次验证，不要一把启动
+
+**为什么**：容器和 nginx 这一层从没跑过（第 0 步①）。一把 `up -d` 出错时，你分不清是哪一层的问题。
+
+**做什么**（一条一条来，每条成功再走下一条）
 
 ```bash
-# ① 在白名单内的机器上执行 —— 期望 200
-curl -s -o /dev/null -w '%{http_code}\n' http://<服务器IP>/
+# 6-1 只解析配置，不启动任何东西
+docker compose -f docker-compose.prod.yml config > /dev/null && echo "配置 OK"
 
-# ② 在白名单外的机器上执行 —— 期望 403
-#    没有第二台机器时，用手机热点或任意非办公网段的设备验证。
-#    这一步不能省：只测到 200 只证明「能进」，不证明「别人进不来」。
-curl -s -o /dev/null -w '%{http_code}\n' http://<服务器IP>/
+# 6-2 只检查 nginx 配置语法（借一个临时容器来检查）
+docker run --rm -v "$PWD/nginx.conf:/etc/nginx/nginx.conf:ro" nginx:1.27-alpine nginx -t
+
+# 6-3 只构建镜像（这一步最慢，也最可能失败）
+docker compose -f docker-compose.prod.yml build
 ```
 
-② 若返回 200 而非 403，说明白名单没有生效，可能原因有两个，都要查：**allow 段仍是占位值或网段写宽了**；或 **app 服务被加了 `ports:` 映射**（见第 8 节，这会让请求绕过 nginx，白名单形同虚设）。
+**应该看到**
 
-### 4.4 构建并启动
+- 6-1 打印 `配置 OK`
+- 6-2 打印 `syntax is ok` 和 `test is successful`
+- 6-3 最后打印 `Successfully built` 之类的成功信息
+
+**如果 6-3 失败了（最可能的一步）**
+
+大概率卡在 `better-sqlite3` 这个原生模块上，报错里会出现 `prebuild-install`、`node-gyp` 或 `ETIMEDOUT`。原因见[附录 A-3](#a-3-为什么构建最可能死在-better-sqlite3)。处理办法：
+
+1. 确认服务器**能访问外网 HTTPS**（`github.com`、`registry.npmjs.org`、Docker Hub、`deb.debian.org`）：
+   ```bash
+   curl -sI https://github.com | head -1
+   curl -sI https://registry.npmjs.org | head -1
+   ```
+2. 如果不能访问外网 → **这台机器造不出镜像**。改成在一台能上网的机器上构建，然后拷过来：
+   ```bash
+   # 联网机器上
+   docker compose -f docker-compose.prod.yml build
+   docker save <镜像名> | gzip > manhour.tar.gz
+   # 拷到服务器后
+   gunzip -c manhour.tar.gz | docker load
+   ```
+
+---
+
+## 第 7 步：启动
+
+**做什么**
 
 ```bash
-docker compose -f docker-compose.prod.yml build
 docker compose -f docker-compose.prod.yml up -d
 docker compose -f docker-compose.prod.yml ps
 ```
 
-**首次构建最可能失败的位置**：`better-sqlite3` 原生模块编译。原因是版本错位 —— `package.json` 要求 `^13.0.2`，但 `@prisma/adapter-better-sqlite3@7.9.1` 声明依赖 `better-sqlite3: ^12.6.0`，npm 因此嵌套安装了第二份 **12.11.1**，而**适配器实际加载的是这份嵌套的 v12**。v13 自带 8 个平台的 `prebuilds/`（linux-x64 是 2.12MB 的 ELF），无需编译；但 v12.11.1 **没有 `prebuilds/`**，其 install 脚本是 `prebuild-install || node-gyp rebuild --release`，需要能访问 github.com 下载预编译产物，否则回退到本地编译。
+**应该看到**：两个服务（`app` 和 `nginx`）状态都是 `Up` / `running`。
 
-`Dockerfile` 的 deps 阶段因此安装了 `python3 make g++` 作为兜底，并选用 Debian（bookworm-slim）而非 Alpine（musl 环境下预编译产物匹配更易出问题）。若构建卡在此处，检查构建机的出网能力。
-
-### 4.5 初始化数据库
-
-**镜像构建过程不需要数据库**（已实测三种情况：`DATABASE_URL` 未设置、指向不存在的路径、正常路径，`next build` 均 EXIT=0 且输出 7 条路由）。因此迁移是**独立的发布步骤**，不在构建期执行。
-
-`prisma/` 目录不会被 `output: "standalone"` 的依赖追踪收集，`Dockerfile` 通过显式 `COPY` 放进镜像，就是为了让这一步能在容器里跑：
+**如果不对**：看日志，报错原文通常直接说明原因。
 
 ```bash
-# 建表（空库会依次应用两个迁移）
+docker compose -f docker-compose.prod.yml logs --tail 50 app
+docker compose -f docker-compose.prod.yml logs --tail 50 nginx
+```
+
+---
+
+## 第 8 步：建表 + 灌入基础数据
+
+**为什么**：镜像里只有程序，没有数据。数据库是空的，需要先建表再灌初始数据。
+
+**做什么**（两条命令，必须按顺序）
+
+```bash
+# 8-1 建表
 docker compose -f docker-compose.prod.yml exec app \
   node node_modules/prisma/build/index.js migrate deploy
 
-# 灌入基础数据：7 部门 / 24 课 / FY2026 / 7 条职务规则 / 288 条计划
+# 8-2 灌入基础数据：7 个部 / 24 个课 / FY2026 财年 / 7 条职务规则 / 288 条计划
 docker compose -f docker-compose.prod.yml exec app \
   node node_modules/prisma/build/index.js db seed
 ```
 
-已实测结果：
+**应该看到**
 
-- 空库执行 `migrate deploy` → EXIT=0，应用 `20260806001207_init` 与 `20260806081541_add_attendance_import`，生成 13 张业务表 + `_prisma_migrations`
-- 已有数据的库执行 `migrate deploy` → EXIT=0，`No pending migrations to apply`
-- `db seed` → EXIT=0，seed 脚本是幂等的（全部 upsert），重复执行安全
+- 8-1：列出应用了哪几个迁移，最后 `All migrations have been successfully applied`
+- 8-2：seed 脚本打印各表写入条数，无报错退出
 
-### 4.6 验证部署（不要跳过）
+**如果不对**
 
-见 [§6 健康检查](#6-健康检查必须做)。**只确认页面能打开是不够的** —— 陷阱 1 会让坏掉的部署看起来完全正常。
+- 报「数据库文件打不开 / 权限不足」→ 回第 3 步查属主
+- 报 `P2021` 表不存在 → 8-1 没成功，别急着跑 8-2
+- 8-2 重复执行是**安全的**（全是 upsert，幂等）
 
 ---
 
-## 5. 日常运维
+## 第 9 步：验证部署（最容易被跳过，也最不能跳过）
 
-### 5.1 备份
+**为什么**：见第 0 步②。「页面能打开」证明不了任何事。
+
+### 9-1 验证数据是真的
+
+在服务器上执行：
+
+```bash
+curl -s --max-time 10 http://localhost/ | grep -q "演示数据" \
+  && echo "❌ 失败：正在显示演示数据，数据库没连上" \
+  || echo "✅ 通过：读到的是真实数据"
+```
+
+**应该看到**：`✅ 通过`。
+
+**如果显示 ❌**，按这个顺序查（从最常见的开始）：
+
+| 顺序 | 查什么 | 命令 |
+| --- | --- | --- |
+| 1 | `ORG_DATA_SOURCE` 是不是 `db` | `grep ORG_DATA_SOURCE .env.production` |
+| 2 | `DATABASE_URL` 是不是绝对路径 | `grep DATABASE_URL .env.production` |
+| 3 | 数据库文件属主是 1000、大小不是 0 | `ls -ln data/` |
+| 4 | 第 8 步是不是漏了 | 重跑 8-1 |
+
+### 9-2 验证访问范围（必须两台机器）
+
+```bash
+# ① 在办公网内的电脑上执行 —— 期望 200
+curl -s -o /dev/null -w '%{http_code}\n' http://<服务器IP>/
+
+# ② 在网段外的设备上执行 —— 期望 403
+#    没有第二台机器？用手机开热点、笔记本连热点来测。
+curl -s -o /dev/null -w '%{http_code}\n' http://<服务器IP>/
+```
+
+**应该看到**：① 是 `200`，② 是 `403`。
+
+> **只测到 ① 的 200 毫无意义**——那只证明「能进」，不证明「别人进不来」。9-1 那个脚本也查不出网段问题，因为它从本机发请求，而 `127.0.0.1` 在任何配置下都放通。
+
+**如果 ② 返回 200 而不是 403**，两个原因都要查：
+
+1. 第 5 步的网段没改，或写宽了
+2. `docker-compose.prod.yml` 里给 `app` 服务加了 `ports:` 映射 → 请求绕过了 nginx，白名单形同虚设（**别加**）
+
+### 9-3 逐页点一遍
+
+浏览器打开 `http://<服务器IP>/`，确认：
+
+- [ ] 首页图表有数据，财年标签后面**没有** `· 演示数据`
+- [ ] 数字带千分位，如 `4,304`、`4,631.5`
+- [ ] 点进 `/plans`、`/admin` 会要求输入口令
+- [ ] 用第 4 步设的口令能登进去
+- [ ] 登进去后能看到计划录入页和管理页
+
+---
+
+## 第 10 步（暂缓）：考勤自动抓取
+
+> [!IMPORTANT]
+> **这一步现在还做不了，先跳过。** 系统设计上考勤是每天自动从 HR 共享目录抓取的，但抓取脚本目前**不在生产镜像里**，需要先补一个编排层改动（详见项目 `DECISIONS.md` 的 D-197）。
+>
+> **在此之前，考勤走人工上传**：管理员登录后在导入页手动上传 HR 的考勤 Excel，功能完整可用。
+>
+> 另外还缺两项 IT/HR 信息才能配置自动抓取：共享目录的完整 UNC 路径、HR 报表每天几点生成完（决定定时任务的时刻）。
+
+这样安排是有意的：先让系统跑起来，共享目录的权限、字符集问题单独排查，不阻塞上线。
+
+---
+
+## 第 11 步：配置每日自动备份
+
+**做什么**
+
+先手动跑一次，确认能备出来：
 
 ```bash
 docker compose -f docker-compose.prod.yml exec app \
   node scripts/backup-db.mjs --db data/dev.db --out backups --keep 30
+ls -lh backups/
 ```
 
-**`--db data/dev.db` 必须显式传。** 脚本默认值是 `dev.db`，会解析到 `/app/dev.db`，而数据库实际挂载在 `/app/data/dev.db`。
+**应该看到**：`backups/` 下出现 `manhour-<时间戳>.db`，且命令没有报错。
 
-脚本行为（均已实测）：
+> **`--db data/dev.db` 必须显式写出来。** 不写的话脚本会去找 `/app/dev.db`（不存在），而数据库实际在 `/app/data/dev.db`。
 
-- 使用 `VACUUM INTO` 而不是 `cp`。数据库运行在 `journal_mode=delete`（非 WAL），写事务期间直接复制文件可能得到不一致的副本。
-- 备份后自动执行 `PRAGMA integrity_check` 并逐表比对行数，任一项不符即报错退出。
-- `--keep N` 保留最新 N 份，其余删除。
-- 输出文件名 `manhour-<本地时间戳>.db`。这也是 compose 里设置 `TZ=Asia/Shanghai` 的原因 —— UTC 容器会把凌晨 4 点的备份命名成 20:00。
+成功后加进服务器的定时任务：
 
-建议在宿主机 crontab 里安排（避开业务时段）：
+```bash
+crontab -e
+```
+
+加一行（凌晨 4:17，避开业务时段）：
 
 ```cron
 17 4 * * * cd /opt/manhour-mgmt/app && docker compose -f docker-compose.prod.yml exec -T app node scripts/backup-db.mjs --db data/dev.db --out backups --keep 30 >> /var/log/manhour-backup.log 2>&1
 ```
 
-注意 `exec -T`：非交互环境下不加会因为无法分配 TTY 而失败。
+> `exec` 后面的 **`-T` 不能省**：定时任务没有终端，不加会因为分配不到 TTY 而失败。
 
-### 5.2 恢复
+**第二天记得确认一下** `backups/` 里有没有新文件、`/var/log/manhour-backup.log` 有没有报错。
+
+---
+
+## 第 12 步：收尾登记
+
+- [ ] 把服务器 IP、访问地址告知使用方
+- [ ] 口令交给需要录入的管理员（**口头或线下，别用邮件/群聊**）
+- [ ] 告知 IT 把 `/opt/manhour-mgmt/app/backups` 纳入公司备份体系
+- [ ] 记录本次部署日期与版本（`git rev-parse --short HEAD`）
+
+**到这里部署完成。** 下面是以后会用到的操作。
+
+---
+
+# 日常操作速查
+
+## 换口令
 
 ```bash
-docker compose -f docker-compose.prod.yml stop app     # 必须先停，避免写入竞争
+# 1. 改值（只改 ADMIN_PASSWORD 那一行）
+vi .env.production
+
+# 2. 只核对长度，别 echo 值
+awk -F= '/^ADMIN_PASSWORD=/{print length($2)}' .env.production
+
+# 3. 必须重启，否则不生效
+docker compose -f docker-compose.prod.yml up -d --force-recreate app
+```
+
+**漏了第 3 步的表现是「改了口令但旧口令还能进」**，不报错，容易误判成改失败。原因：Node 启动时把环境变量快照了，运行中不会重读。
+
+### ⚠️ 改口令挡不住已经登录的人
+
+会话 cookie 有效期 **30 天**，它由 `SESSION_SECRET` 签名，跟口令无关：
+
+| 场景 | 只改 `ADMIN_PASSWORD` | 两个都改 |
+| --- | --- | --- |
+| 新的登录尝试 | 旧口令失效 ✅ | 旧口令失效 ✅ |
+| 已经登录的浏览器 | **还能继续用，最长 30 天** ❌ | 立刻失效 ✅ |
+
+**口令疑似泄露时必须两个一起换**。换 `SESSION_SECRET` 会踢掉所有人**包括你自己**，换完要重新登录。
+
+## 恢复数据
+
+```bash
+docker compose -f docker-compose.prod.yml stop app     # 必须先停，否则会写冲突
 cp backups/manhour-20260812-041700.db data/dev.db
-sudo chown 1000:1000 data/dev.db                        # 陷阱 3
+sudo chown 1000:1000 data/dev.db
 docker compose -f docker-compose.prod.yml start app
 ```
 
-恢复后**必须**执行 §6 的健康检查确认读到的是真实数据。
+**恢复后必须重跑第 9-1 步**确认读到的是真实数据。
 
-### 5.3 发布新版本
+## 发布新版本
 
 ```bash
+# 0. 先备份！
+docker compose -f docker-compose.prod.yml exec app \
+  node scripts/backup-db.mjs --db data/dev.db --out backups --keep 30
+
 git pull
 docker compose -f docker-compose.prod.yml build
 docker compose -f docker-compose.prod.yml up -d
+
+# 有新的数据库变更时才需要这条
 docker compose -f docker-compose.prod.yml exec app \
-  node node_modules/prisma/build/index.js migrate deploy   # 有新迁移时才需要
+  node node_modules/prisma/build/index.js migrate deploy
 ```
 
-**发布前先备份**（§5.1）。数据库是 bind mount，不受镜像重建影响，但迁移可能不可逆。
+数据库在 bind mount 里，重建镜像不会动它。但**迁移可能不可逆，所以先备份**。
 
-### 5.4 查看日志
+## 看日志
 
 ```bash
-docker compose -f docker-compose.prod.yml logs -f app
-docker compose -f docker-compose.prod.yml logs -f nginx
+docker compose -f docker-compose.prod.yml logs -f app      # 应用
+docker compose -f docker-compose.prod.yml logs -f nginx    # 反向代理
 ```
 
-容器日志是本系统唯一的诊断记录（没有日志聚合）。compose 里限制为单文件 10MB × 3 份，避免崩溃循环写满磁盘。
+容器日志是本系统**唯一**的诊断记录（没有日志聚合系统）。日志限制为单文件 10MB × 3 份，防止崩溃循环写满磁盘。
+
+## 重启 / 停止
+
+```bash
+docker compose -f docker-compose.prod.yml restart app
+docker compose -f docker-compose.prod.yml down          # 停止并删除容器（数据不丢）
+docker compose -f docker-compose.prod.yml up -d         # 再启动
+```
 
 ---
 
-## 6. 健康检查（必须做）
+# 出问题了看这里
 
-**不要用 `curl -f http://localhost/`。** 陷阱 1 决定了它必然返回 200，无论数据库是否可用。
-
-正确的检查是断言 `演示数据` 标记**不存在**：
-
-```bash
-#!/bin/sh
-# 部署后 / 恢复后 / 定时巡检
-BODY=$(curl -s --max-time 10 http://localhost/)
-
-if [ -z "$BODY" ]; then
-  echo "FAIL: 无响应"; exit 1
-fi
-
-if echo "$BODY" | grep -q "演示数据"; then
-  echo "FAIL: 正在展示演示数据 —— 数据库不可用或 ORG_DATA_SOURCE 不是 db"
-  exit 1
-fi
-
-echo "OK"
-```
-
-失败时的排查顺序：
-
-1. `ORG_DATA_SOURCE` 是否为 `db`（陷阱 1 的最常见原因，也是最容易查的）
-2. `DATABASE_URL` 是否为绝对路径 `file:/app/data/dev.db`（陷阱 2）
-3. `data/dev.db` 的属主是否为 uid 1000 且文件大小非 0（陷阱 3）
-4. 是否忘记执行 `migrate deploy`（表不存在同样触发降级）
-
-补充核对（有真实数据时）：首页数字应带千分位分隔符，例如人员工时 `4,304`、总工时 `4,631.5`。
-
-**上面的脚本查不出白名单配错。** 它从服务器本机发起请求，而 `127.0.0.1` 在任何配置下都是放通的，所以它永远报绿。访问范围是否正确，只能按 §4.3 ② 从白名单外的机器验证一次 —— 这项检查在每次改动 `nginx.conf` 的 allow 段后都要重做。
+| 症状 | 最可能的原因 | 怎么办 |
+| --- | --- | --- |
+| 页面能开，但图表数字看着不对，标签后有 `· 演示数据` | 数据库没连上 | 按第 9-1 步的四项排查表逐条查 |
+| 口令输对了，一直跳回登录页，日志无报错 | `COOKIE_SECURE=true` 但实际是 HTTP | 改成 `false`，然后 `up -d --force-recreate app` |
+| 登录页提示「服务端尚未配置管理员口令」 | `ADMIN_PASSWORD` 空 | 第 4 步 |
+| 所有人都登不进去，包括口令没错的 | `SESSION_SECRET` 缺失或不足 32 位 | 第 4 步 |
+| 改了口令，旧口令还能用 | 没重启容器 | `up -d --force-recreate app` |
+| 页面能打开但完全没有样式 | 静态资源没进镜像 | 重新 `build`；见[附录 B](#附录-b已知约束) |
+| 上传考勤文件报英文 413 或上传中途断开 | nginx 的体积上限被改小了 | 见[附录 A-4](#a-4-上传体积上限为什么是-14mb) |
+| 构建卡住或超时，报错含 `node-gyp` / `prebuild-install` | 服务器上不了外网 | 见第 6 步的处理办法 |
+| 网段外的机器也能访问 | 网段没改，或 app 被加了 `ports:` | 第 5 步 + 第 9-2 步 |
+| 备份定时任务不执行 | cron 里漏了 `exec -T` | 第 11 步 |
 
 ---
 
-## 7. 上传体积上限的对齐关系
+# 附录 A：为什么这样做（出问题时再看）
 
-nginx 的 `client_max_body_size` 设为 **14m**，这个值是刻意夹在应用自身的两个限制之间的：
+## A-1 为什么「数据库坏了却返回 200」
+
+`src/lib/org-source.ts` 把数据库异常归类为「基础设施故障」，然后降级到内存里的演示数据。页面正常渲染、状态码 200、图表有数字，唯一线索是首页那个 `· 演示数据` 标记（`src/app/page.tsx:62`）。
+
+这是**故意的设计**（演示阶段的遗留能力），但它让所有「只看状态码」的监控失效。所以：
+
+- `Dockerfile` 和 compose 里**故意不写 HEALTHCHECK**
+- 正确的检查必须断言 `演示数据` 这四个字**不存在**（第 9-1 步）
+- 如果要接公司监控 Agent，也必须按内容断言，不能只看 HTTP 200
+
+## A-2 两个会触发「假数据」的配置错误
+
+**① `DATABASE_URL` 写相对路径。** standalone 的 `server.js` 启动时会执行 `process.chdir(__dirname)`，相对路径 `file:./dev.db` 会相对于 server 目录解析，better-sqlite3 **不报错，而是新建一个 0 字节文件**，Prisma 随后抛 `P2021`（表不存在）→ 降级成假数据。**这是实测复现的，不是推测。**
+
+**② bind mount 属主不对。** 容器以 uid 1000 运行，`./data` 若不可被 uid 1000 写入，SQLite 打开写事务失败 → 同样降级。数据库跑在 `journal_mode=delete` 模式，写入时需要在同目录创建 `-journal` 临时文件，所以**光有文件写权限不够，目录也要可写**。
+
+bind mount 会**覆盖**镜像里的目录并沿用宿主机属主，所以 `Dockerfile` 里的 `chown` 对它无效——只能在服务器上 `chown`（第 3 步）。
+
+## A-3 为什么构建最可能死在 better-sqlite3
+
+版本错位：`package.json` 要求 `better-sqlite3 ^13.0.2`，但 `@prisma/adapter-better-sqlite3@7.9.1` 声明依赖 `^12.6.0`，于是 npm **嵌套装了第二份 12.11.1**，而**适配器实际加载的是这份嵌套的 v12**。
+
+关键差异：v13 自带 8 个平台的 `prebuilds/`（linux-x64 是 2.12MB 的 ELF），开箱即用；**v12.11.1 没有 `prebuilds/`**，它的 install 脚本是 `prebuild-install || node-gyp rebuild --release`——先尝试从 **GitHub Release** 下载预编译包，下不到就本地编译。
+
+所以构建需要的出网目标不止 npm：Docker Hub、`deb.debian.org`（镜像内 apt 装 `python3 make g++`）、`registry.npmjs.org`、**以及 `github.com` / `objects.githubusercontent.com`**。
+
+`Dockerfile` 的 deps 阶段预装了 `python3 make g++` 作为编译兜底，并选 Debian（bookworm-slim）而非 Alpine——musl 环境下预编译产物匹配更容易出问题。
+
+## A-4 上传体积上限为什么是 14MB
+
+nginx 的 `client_max_body_size 14m` 是**刻意夹在应用自身的两个限制之间**的：
 
 | 层 | 上限 | 位置 |
 | --- | --- | --- |
-| 单文件 | 4 MB | `src/lib/attendance/upload-guard.ts:23` |
-| 单批次（最多 10 个文件） | 12 MB | `src/lib/attendance/upload-guard.ts:29` |
+| 单个文件 | 4 MB | `src/lib/attendance/upload-guard.ts:23` |
+| 一批（最多 10 个文件） | 12 MB | `src/lib/attendance/upload-guard.ts:29` |
 | 计划导入单文件 | 2 MB | `src/app/plans/import/actions.ts:54` |
 | **nginx** | **14 MB** | `nginx.conf` |
-| Server Action | 16 MB | `next.config.mjs` |
+| Next Server Action | 16 MB | `next.config.mjs` |
 
-顺序是关键：超限批次由 `upload-guard.ts` 拒绝，返回指明具体文件与限额的**中文提示**。如果 nginx 设成 12m 或更小，请求会先被 nginx 截断，运维只能看到一个不含任何上下文的英文 413 页面 —— 甚至可能是浏览器层面的连接错误（nginx 可能在上传中途关闭连接）。
+顺序是关键：超限的批次由应用拒绝，返回**指名具体文件和限额的中文提示**。如果把 nginx 改成 12m 或更小，请求会先被 nginx 掐断，操作者只能看到一个不含任何上下文的英文 413 页面，甚至是浏览器层面的连接中断。**改任何一层限额时都要保持这个大小顺序。**
 
-改动任一层的限额时，必须保持这个顺序不变。
+## A-5 为什么 `.dockerignore` 是必需的，不是优化项
+
+1. **体积**：`node_modules` 是 929.5 MB / 50,991 个文件，不排除的话每次构建都要打包上传给 Docker daemon。
+2. **正确性（更要紧）**：开发机上的 `.node` 原生模块是 **Windows PE 格式**（magic `4d5a9000`）。一旦混进构建上下文，会覆盖镜像里正确的 Linux ELF 二进制，运行时报 `invalid ELF header`——这个报错看起来像镜像损坏，极难定位真因。
+
+另注意：`.dockerignore` 用 Go 的 `filepath.Match`，**只匹配单层路径**。写 `*.db` 只能匹配根目录，`prisma/dev.db` 照样会被打包进镜像层（真实考勤数据泄漏）。所有数据类模式都必须写成 `**/` 形式。
+
+## A-6 共享口令能追到什么、追不到什么
+
+所有管理员用同一个口令，`MasterDataChangeLog.changedBy` 是固定字面量 `"admin"`。
+
+> **口令给了几个人，`/admin/audit` 就只能追到「某个管理员」，追不到「谁」。**
+
+留痕能证明「改了什么、什么时候改的」，**不能证明「谁改的」**。对外说明审计能力时不要越过这条线。
+
+口令也**不会过期**，没有到期提醒、不会强制更换（这是明确决定，不是漏做）。口令以明文存在环境变量里、与提交值做常量时间比对，**没有做 hash**——因此：**能登服务器读 `.env.production` 的人 = 知道口令的人。**
+
+## A-7 会话为什么是 30 天而不是更短
+
+月度重新登录是使用者能容忍的摩擦；每日登录会把人逼到「把口令写在便利贴上」，那比长 cookie 更糟。理由写在 `src/lib/session-cookie.ts` 的注释里，想改短之前先读它。
 
 ---
 
-## 8. 已知约束
+# 附录 B：已知约束
 
-- **SQLite 只能单副本。** compose 中 `replicas: 1` 是硬约束：SQLite 是单文件、`journal_mode=delete`，两个副本并发写会产生 `SQLITE_BUSY`。横向扩容需要先完成 PostgreSQL 迁移（批次 5B），提高副本数不解决问题。
-- **HTTP 明文。** D-007 限定内网、无公网暴露，v1 不引入证书。**一旦需要跨出内网，HTTPS 不再是可选项** —— 免登录（D-008）+ 明文 + 可路由网络的组合无法接受。
-- **app 服务不映射端口。** 这是 D-008 的另一半：app 只能从 compose 网络内访问，无法绕过 nginx 白名单。给 app 加 `ports:` 会彻底废掉访问控制。
-- **业务日期与容器时区无关。** `src/lib/db/date.ts:50` 固定 `BUSINESS_TIME_ZONE = "Asia/Shanghai"`，通过 `Intl.DateTimeFormat` 计算业务日。`TZ` 只影响日志时间戳和备份文件名。
-- **`.next/static` 需要单独 COPY。** `output: "standalone"` 不会复制 `.next/static/`，也不会复制 `public/`（本项目没有 `public/`）。漏掉这一步的表现是页面能打开但没有样式。
-- **没有配置 CSP。** Next 为水合和流式渲染注入内联脚本，有效的 CSP 需要在应用层打通 per-request nonce。手写一份要么把页面弄坏，要么退化成 `'unsafe-inline'` 而毫无实际防护。列为 v2 事项，不作为装饰性配置发布。
+- **SQLite 只能单副本。** compose 里的 `replicas: 1` 是硬约束，不是保守设置：SQLite 是单文件、`journal_mode=delete`，两个副本并发写会报 `SQLITE_BUSY`。**加副本不能提高性能，只会出错。** 横向扩容需要先迁移到 PostgreSQL（后续独立批次）。
+- **数据库文件不能放在网络存储上**（NFS/CIFS/NAS）。SQLite 在网络文件系统上的锁语义不可靠。共享目录只用来**读**考勤 Excel。
+- **HTTP 明文传输。** v1 限定内网、不暴露公网。**一旦需要跨出内网，HTTPS 就不再是可选项。**
+- **app 服务不映射端口。** app 只能从 compose 内网访问，无法绕过 nginx。**给 app 加 `ports:` 会彻底废掉访问控制。**
+- **业务日期与容器时区无关。** `src/lib/db/date.ts:50` 固定 `BUSINESS_TIME_ZONE = "Asia/Shanghai"`。`TZ` 只影响日志时间戳和备份文件名——这也是 compose 里设 `TZ=Asia/Shanghai` 的原因，否则 UTC 容器会把凌晨 4 点的备份命名成前一天 20:00。
+- **`.next/static` 需要单独 COPY。** `output: "standalone"` 不会复制 `.next/static/`。漏掉的表现是**页面能打开但完全没有样式**。
+- **没有配置 CSP。** Next 为水合和流式渲染注入内联脚本，有效的 CSP 需要应用层打通 per-request nonce。手写一份要么把页面弄坏，要么退化成 `'unsafe-inline'` 而毫无防护。列为 v2 事项，不作为装饰性配置发布。
+- **备份脚本用 `VACUUM INTO` 而不是 `cp`。** 数据库跑在 `journal_mode=delete`（非 WAL），写事务期间直接复制文件可能得到不一致的副本。备份后会自动执行 `PRAGMA integrity_check` 并逐表比对行数，任一项不符即报错退出。
 
 ---
 
-## 9. 相关决策
+# 附录 C：部署产物清单与相关决策
 
-| 编号 | 内容 |
+全部位于 `app/` 目录（同时是 git 仓库根和 Docker 构建上下文根）：
+
+| 文件 | 作用 |
+| --- | --- |
+| `Dockerfile` | 三阶段构建（deps / builder / runner），Node 24.15.0 + bookworm-slim |
+| `.dockerignore` | 排除 `node_modules`、`*.db`、`.env` 等；**必需**，见附录 A-5 |
+| `docker-compose.prod.yml` | app + nginx 两个服务 |
+| `nginx.conf` | 反向代理 + IP 允许列表 |
+| `.env.production.example` | 配置模板（复制为 `.env.production`） |
+| `scripts/backup-db.mjs` | 备份（`VACUUM INTO` + 完整性校验 + 行数比对 + 保留策略） |
+
+| 决策编号 | 内容 |
 | --- | --- |
 | D-006 | 技术栈：Next.js + Prisma + shadcn/ui + Recharts，全栈单体内网 Docker 部署 |
-| D-007 | 部署方式：内网自部署，不上公有云 |
-| D-008 | v1 免登录 —— 内网 IP 白名单即可 |
-| D-171 | 本批部署产物与 SQLite 直上路线（详见 `DECISIONS.md`） |
+| D-007 | 内网自部署，不上公有云 |
+| D-008 | v1 原定免登录（写入部分已被 D-180 推翻） |
+| D-171 | 部署产物与 SQLite 直上路线 |
+| D-180 | 写入面口令闸门（共享口令） |
+| D-181 | 登录限速 |
+| D-188 | `DATABASE_URL` 必须绝对路径 |
+| D-194 | 口令永久有效、无过期机制；会话 30 天 |
+| D-196 | 服务器规格基线（见 `SERVER_REQUIREMENTS.md`） |
+| D-197 | 考勤自动抓取为主 + 人工上传兜底（第 10 步暂缓的原因） |
+
+完整推理过程见项目根目录的 `DECISIONS.md`。

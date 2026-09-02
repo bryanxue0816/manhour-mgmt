@@ -147,6 +147,39 @@ export function formatDateOnly(value: Date): string {
 }
 
 /**
+ * Formatter projecting an instant onto a business-local wall clock.
+ *
+ * Built once at module load for the same reason as BUSINESS_DAY_FORMAT: the audit
+ * screen formats one timestamp per row, and `toLocaleString` rebuilds the formatter
+ * on every call.
+ */
+const BUSINESS_TIMESTAMP_FORMAT = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: BUSINESS_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+/**
+ * Formats an instant as a business-local `YYYY/MM/DD HH:mm`.
+ *
+ * Shared rather than hand-written per page on purpose (D-189). The zone must be
+ * explicit: without it `toLocaleString` inherits the host zone, so an app moved to a
+ * UTC server would render every audit row and every import timestamp eight hours off,
+ * with nothing on screen to reveal it. Both existing call sites had been written
+ * separately and one of them had already lost the `timeZone` option that way.
+ *
+ * Deliberately NOT formatDateOnly(): that one asserts a calendar day and throws on
+ * an instant. The two are different kinds of value and stay different functions.
+ */
+export function formatBusinessTimestamp(value: Date): string {
+  return BUSINESS_TIMESTAMP_FORMAT.format(value);
+}
+
+/**
  * Validates a database fiscal month.
  *
  * Called at every write boundary. An out-of-range month would land in a row that
@@ -203,6 +236,47 @@ export function fiscalMonthLabel(year: number, month: number): string {
   const calendarYear = offset > 12 ? year + 1 : year;
   const calendarMonth = offset > 12 ? offset - 12 : offset;
   return `${String(calendarYear % 100).padStart(2, "0")}/${String(calendarMonth).padStart(2, "0")}`;
+}
+
+/**
+ * Fiscal month (1 = April) for a CALENDAR month label such as `2026年4月`.
+ *
+ * The opposite direction from fiscalMonthLabel(), for figures that arrive worded the way
+ * people write months. It lives here, next to the offset it depends on, because a
+ * hand-filled sheet says `2026年4月` while `Actual.month` stores a fiscal ordinal in which
+ * 4 means July: copying the number straight across files April's hours as July's with no
+ * error, no exception, no log line, and a chart that renders perfectly. Routed through a
+ * calendar day and fiscalMonthOf() rather than arithmetic on the number, because local
+ * arithmetic is exactly where that three-month shift gets reintroduced.
+ *
+ * @param label `YYYY年M月`, leading zero on the month optional.
+ * @param fiscalYear the fiscal year the caller believes the label belongs to.
+ * @returns 1..12, 1 = April.
+ * @throws if the label is malformed, or if it belongs to a DIFFERENT fiscal year - a
+ *   `2027年4月` row inside a FY2026 sheet is a filled-in-the-wrong-file mistake, and
+ *   accepting it as FY2026 month 1 would silently double up with April.
+ */
+export function fiscalMonthFromCalendarLabel(label: string, fiscalYear: number): number {
+  const match = /^(\d{4})年(\d{1,2})月$/.exec(label);
+  if (!match) {
+    throw new Error(`月份格式不认识：${JSON.stringify(label)}（应形如 2026年4月）`);
+  }
+  const calendarYear = match[1] ?? "";
+  const calendarMonth = Number(match[2]);
+  if (calendarMonth < 1 || calendarMonth > 12) {
+    throw new Error(`月份超范围：${JSON.stringify(label)}`);
+  }
+  const day = parseDateOnly(
+    `${calendarYear}-${String(calendarMonth).padStart(2, "0")}-01`,
+  );
+  const actualFiscalYear = fiscalYearOf(day);
+  if (actualFiscalYear !== fiscalYear) {
+    throw new Error(
+      `${label} 属于 FY${String(actualFiscalYear)}，不属于本次导入的 FY${String(fiscalYear)}。` +
+        "请确认 --year 与文件内容一致。",
+    );
+  }
+  return fiscalMonthOf(day);
 }
 
 /**

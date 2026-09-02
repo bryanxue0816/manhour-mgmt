@@ -5,8 +5,17 @@
 // after a re-import. Sorting on it alone leaves ties resolved by whatever the storage
 // engine returns, which can differ between two queries over identical data. The
 // dashboard addresses departments and sections by ARRAY INDEX, so a drifting
-// tie-break silently drills into the wrong node. `name` is unique per level, so
-// (sortOrder, name) is a total order.
+// tie-break silently drills into the wrong node.
+//
+// (sortOrder, name) is a total order for Department only - `Department.name` is
+// globally `@unique`. It is NOT one for Section: `Section` only has
+// `@@unique([departmentId, name])`, so a 課 name is unique within its 部, not across
+// the table. findAllSections() therefore returns a stable order only as long as no
+// two departments hold an equally-named 課 at the same sortOrder - a collision that
+// becomes likely once sortOrder means "position within the department" rather than
+// "Excel row number". Callers that need a guaranteed order must sort with
+// departmentId participating; buildOrgRoot() is safe because it re-buckets by
+// department before indexing. Do not rely on raw findAllSections() indices.
 //
 // Write inputs are forwarded to Prisma verbatim to preserve the `undefined` = leave
 // the stored value alone / `null` = clear the column distinction. Coercing with
@@ -123,8 +132,17 @@ export async function loadOrgSnapshot(): Promise<OrgSnapshot> {
  * pre-read is what lets the trail say `create` or `update` truthfully - Prisma's
  * upsert does not report which branch it took, and a re-import recorded as `create`
  * would misdescribe an overwrite.
+ *
+ * @param reason - optional free-text why (D-184), kept as a separate argument rather
+ *   than a field on `input`: `input` maps one-to-one onto columns of `Department`, and
+ *   folding audit metadata into it is how a reason eventually gets written into the
+ *   business row by accident. Seed and Excel re-imports pass nothing, so their rows
+ *   carry null - which is correct, a bulk re-upload has no per-row explanation.
  */
-export async function upsertDepartment(input: DepartmentUpsertInput): Promise<DepartmentDto> {
+export async function upsertDepartment(
+  input: DepartmentUpsertInput,
+  reason?: string | null,
+): Promise<DepartmentDto> {
   const written = await writeMasterDataWithAudit(
     "organization",
     async (tx) => {
@@ -139,7 +157,7 @@ export async function upsertDepartment(input: DepartmentUpsertInput): Promise<De
       });
       return { dto: toDepartmentDto(row), created: existing === null };
     },
-    (w) => ({ action: w.created ? "create" : "update", targetKey: w.dto.name }),
+    (w) => ({ action: w.created ? "create" : "update", targetKey: w.dto.name, reason }),
   );
   return written.dto;
 }
@@ -149,9 +167,13 @@ export async function upsertDepartment(input: DepartmentUpsertInput): Promise<De
  * Section names are only unique within their department, hence the compound
  * `@@unique([departmentId, name])` key rather than `name` alone.
  *
- * Audited per D-173 - see {@link upsertDepartment} for why the pre-read is here.
+ * Audited per D-173 - see {@link upsertDepartment} for why the pre-read is here, and
+ * for why `reason` is a separate argument.
  */
-export async function upsertSection(input: SectionUpsertInput): Promise<SectionDto> {
+export async function upsertSection(
+  input: SectionUpsertInput,
+  reason?: string | null,
+): Promise<SectionDto> {
   const { departmentId, name, sortOrder } = input;
   const written = await writeMasterDataWithAudit(
     "organization",
@@ -167,7 +189,7 @@ export async function upsertSection(input: SectionUpsertInput): Promise<SectionD
       });
       return { dto: toSectionDto(row), created: existing === null };
     },
-    (w) => ({ action: w.created ? "create" : "update", targetKey: w.dto.name }),
+    (w) => ({ action: w.created ? "create" : "update", targetKey: w.dto.name, reason }),
   );
   return written.dto;
 }
@@ -181,14 +203,18 @@ export async function upsertSection(input: SectionUpsertInput): Promise<SectionD
  * @throws if no department has this id (Prisma P2025) - the transaction rolls back
  *   and no snapshot is written, so the trail never claims a failed edit happened.
  */
-export async function updateDepartment(id: string, patch: DepartmentPatch): Promise<DepartmentDto> {
+export async function updateDepartment(
+  id: string,
+  patch: DepartmentPatch,
+  reason?: string | null,
+): Promise<DepartmentDto> {
   return writeMasterDataWithAudit(
     "organization",
     async (tx) => {
       const row = await tx.department.update({ where: { id }, data: departmentData(patch) });
       return toDepartmentDto(row);
     },
-    (dto) => ({ action: "update", targetKey: dto.name }),
+    (dto) => ({ action: "update", targetKey: dto.name, reason }),
   );
 }
 
@@ -202,14 +228,18 @@ export async function updateDepartment(id: string, patch: DepartmentPatch): Prom
  * @throws if no section has this id (Prisma P2025) - the transaction rolls back and
  *   no snapshot is written.
  */
-export async function updateSection(id: string, patch: SectionPatch): Promise<SectionDto> {
+export async function updateSection(
+  id: string,
+  patch: SectionPatch,
+  reason?: string | null,
+): Promise<SectionDto> {
   return writeMasterDataWithAudit(
     "organization",
     async (tx) => {
       const row = await tx.section.update({ where: { id }, data: sectionData(patch) });
       return toSectionDto(row);
     },
-    (dto) => ({ action: "update", targetKey: dto.name }),
+    (dto) => ({ action: "update", targetKey: dto.name, reason }),
   );
 }
 
@@ -258,11 +288,17 @@ export class SectionRenameError extends Error {
  *
  * @param newName - already trimmed and validated by the caller. Compared verbatim,
  *   like every other section key (see aliasKey's note on normalisation).
+ * @param reason - optional free-text why (D-184). Ignored on the no-op path below,
+ *   which writes no row for it to annotate.
  * @returns the section after the rename; unchanged, with nothing written, when
  *   `newName` already equals the stored name.
  * @throws {SectionRenameError} on any of the four refusals.
  */
-export async function renameSectionWithAlias(id: string, newName: string): Promise<SectionDto> {
+export async function renameSectionWithAlias(
+  id: string,
+  newName: string,
+  reason?: string | null,
+): Promise<SectionDto> {
   return prisma.$transaction(async (tx) => {
     const current = await tx.section.findUnique({
       where: { id },
@@ -341,6 +377,7 @@ export async function renameSectionWithAlias(id: string, newName: string): Promi
       entity: "organization",
       action: "update",
       targetKey: row.name,
+      reason,
     });
     return toSectionDto(row);
   });

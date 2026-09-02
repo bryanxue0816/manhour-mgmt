@@ -67,8 +67,16 @@ export async function findJobTitleRule(
  * the personnel/overtime totals, so "when did this rule start looking like this" is
  * exactly the question a disputed aggregate raises. The pre-read distinguishes
  * `create` from `update`, which Prisma's upsert does not report.
+ *
+ * @param reason - optional free-text why (D-184), a separate argument rather than a
+ *   field on `input`: `input` is a {@link JobTitleRuleDto} that maps one-to-one onto
+ *   columns of `job_title_rule`, and folding audit metadata into it is how a reason
+ *   eventually gets written into the business row by accident.
  */
-export async function upsertJobTitleRule(input: JobTitleRuleDto): Promise<void> {
+export async function upsertJobTitleRule(
+  input: JobTitleRuleDto,
+  reason?: string | null,
+): Promise<void> {
   await writeMasterDataWithAudit(
     "job_title_rule",
     async (tx) => {
@@ -92,7 +100,11 @@ export async function upsertJobTitleRule(input: JobTitleRuleDto): Promise<void> 
       });
       return existing === null;
     },
-    (created) => ({ action: created ? "create" : "update", targetKey: input.jobTitle }),
+    (created) => ({
+      action: created ? "create" : "update",
+      targetKey: input.jobTitle,
+      reason,
+    }),
   );
 }
 
@@ -110,9 +122,14 @@ export async function upsertJobTitleRule(input: JobTitleRuleDto): Promise<void> 
  * Audited per D-173. A P2002 collision rolls the transaction back, so a rejected
  * duplicate leaves no snapshot behind.
  *
+ * @param reason - optional free-text why (D-184). A P2002 rollback discards it along
+ *   with the snapshot row, so a rejected duplicate leaves no orphaned explanation.
  * @throws PrismaClientKnownRequestError P2002 when the title already has a rule.
  */
-export async function createJobTitleRule(input: JobTitleRuleDto): Promise<void> {
+export async function createJobTitleRule(
+  input: JobTitleRuleDto,
+  reason?: string | null,
+): Promise<void> {
   await writeMasterDataWithAudit(
     "job_title_rule",
     async (tx) => {
@@ -125,7 +142,7 @@ export async function createJobTitleRule(input: JobTitleRuleDto): Promise<void> 
         },
       });
     },
-    () => ({ action: "create", targetKey: input.jobTitle }),
+    () => ({ action: "create", targetKey: input.jobTitle, reason }),
   );
 }
 
@@ -144,6 +161,10 @@ export async function createJobTitleRule(input: JobTitleRuleDto): Promise<void> 
  * every rule, so per-row rows would repeat the identical payload N times while
  * describing a single operation. Because this function owns its transaction it calls
  * the audit functions directly rather than through writeMasterDataWithAudit.
+ *
+ * Takes no `reason` (D-184), unlike {@link upsertJobTitleRule}: the only caller is the
+ * seed, which replays a fixed rule set with no operator behind it. A wholesale batch
+ * has no per-rule explanation to record, so this snapshot's reason is always null.
  */
 export async function upsertJobTitleRulesBulk(
   inputs: readonly JobTitleRuleDto[],

@@ -22,6 +22,7 @@
 
 import { revalidatePath } from "next/cache";
 
+import { requireAdmin } from "@/lib/auth";
 import { findFiscalYearById } from "@/lib/db/fiscal-year.repo";
 import { loadOrgSnapshot } from "@/lib/db/org.repo";
 import { countPlansByFiscalYear, upsertPlansBulkWithAudit } from "@/lib/db/plan.repo";
@@ -197,6 +198,13 @@ function readReason(
 export async function previewPlanImport(
   formData: FormData,
 ): Promise<PlanImportPreviewResult> {
+  // Gate first: even a preview reads the org snapshot and the fiscal year, and an
+  // unauthorised caller must not learn what the workbook is checked against.
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    return fail(gate.message);
+  }
+
   const fiscalYearId = formData.get("fiscalYearId");
   if (typeof fiscalYearId !== "string" || fiscalYearId.trim() === "") {
     return fail("请先选择要导入的财年。");
@@ -267,6 +275,11 @@ export async function previewPlanImport(
 export async function commitPlanImport(
   formData: FormData,
 ): Promise<PlanImportCommitResult> {
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    return fail(gate.message);
+  }
+
   const fiscalYearId = formData.get("fiscalYearId");
   if (typeof fiscalYearId !== "string" || fiscalYearId.trim() === "") {
     return fail("请先选择要导入的财年。");

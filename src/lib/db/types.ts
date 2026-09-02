@@ -5,6 +5,8 @@
 // swapping SQLite for PostgreSQL (or Prisma for anything else) stays contained
 // inside this directory.
 
+import type { ActualSource } from "./actual-source";
+
 /** A department (部). */
 export interface DepartmentDto {
   id: string;
@@ -75,6 +77,97 @@ export interface ActualRow {
   /** May be negative (deductions can exceed additions). */
   overtimeHours: number;
   totalHours: number;
+  /**
+   * How the figure was produced (D-198): `"fold"` from attendance detail, `"manual"`
+   * typed in by hand for a month that predates go-live.
+   *
+   * Carried on the read DTO because it changes what the OTHER columns mean, not just
+   * where they came from: a manual row holds the whole month in `totalHours` with
+   * `personnelHours` and `overtimeHours` at 0, since the 人员/加班 split comes from
+   * per-employee columns that do not exist for those months. Without this field the
+   * screen shows two real zeros next to a real total and no way to tell that apart
+   * from a section that genuinely logged no overtime.
+   */
+  source: ActualSource;
+}
+
+/**
+ * One adjustment slip (D-233): hours that belong in a section-month's 实绩 but have no
+ * attendance detail behind them.
+ *
+ * Carries `id` unlike ActualRow, which is keyed by (sectionId, fiscalYearId, month):
+ * there is deliberately no unique key here, so a slip can only be revoked by identity.
+ */
+export interface ActualAdjustmentRow {
+  id: string;
+  sectionId: string;
+  fiscalYearId: string;
+  /** 1..12, where 1 = April. */
+  month: number;
+  /**
+   * Signed. A hand tally BELOW the folded figure is corrected by a negative slip - the
+   * same operation as a positive one, so neither direction is a special case.
+   */
+  hours: number;
+  /** Never empty; enforced at the write boundary, not merely by NOT NULL. */
+  reason: string;
+  /**
+   * The section-month's folded `totalHours` when this slip was written; 0 when no actual
+   * row existed yet.
+   *
+   * Null means NOT RECORDED, never "unchanged" - the drift check skips such slips rather
+   * than assuming the base held still. Only a write outside the repo (hand-written SQL)
+   * can produce null.
+   */
+  foldHoursAtEntry: number | null;
+  /** Always "admin" - a placeholder, not an identity (D-142). */
+  changedBy: string;
+  changedAt: Date;
+  /** Set when revoked; a revoked slip stays stored and stops counting. */
+  revokedAt: Date | null;
+  revokedBy: string | null;
+}
+
+/** Write payload for one adjustment slip. `changedBy`/`changedAt` are defaulted by the DB. */
+export interface ActualAdjustmentInput {
+  sectionId: string;
+  fiscalYearId: string;
+  month: number;
+  hours: number;
+  reason: string;
+}
+
+/**
+ * An actual row with its adjustments folded in (D-233).
+ *
+ * DELIBERATELY A SUPERSET of ActualRow rather than a replacement. Every existing
+ * consumer reads `totalHours` and keeps compiling unchanged when a query starts
+ * returning this type, so the read-side rollout is additive instead of a breaking
+ * signature change across the dashboard, the adapter and the 实绩 screen at once.
+ *
+ * `totalHours` KEEPS ITS MEANING: the folded figure, still equal to
+ * personnelHours + overtimeHours. It is not blended with the adjustment. The cost of
+ * that choice is that a read point nobody migrated shows an UNDERSTATED number - chosen
+ * on purpose, because understated-and-noticeable beats plausible-and-wrong.
+ */
+export interface ActualEffectiveRow extends ActualRow {
+  /** Sum of un-revoked slips for this section-month. 0 when there are none. */
+  adjustmentHours: number;
+  /** totalHours + adjustmentHours. This is what D-141's 实绩 now means. */
+  effectiveHours: number;
+  /**
+   * True when at least one un-revoked slip on this section-month recorded a folded base
+   * that no longer matches `totalHours`.
+   *
+   * MEANS "SUSPECT", NOT "WRONG". The slip was entered against a different折算值, so its
+   * hours may now be double-counting detail that has since arrived - or the base may have
+   * moved for an unrelated and perfectly fine reason. Only a human reading the slip's
+   * reason can tell, which is why this raises a warning on the 实绩 screen and never
+   * silently drops or rescales the adjustment.
+   *
+   * Always false while no slip carries a recorded base, so it costs nothing until it fires.
+   */
+  foldChangedSinceAdjustment: boolean;
 }
 
 /** Working-day classification. Mirrors the strings stored in work_calendar.day_type. */
@@ -137,6 +230,23 @@ export interface ImportLogDto {
   /** Rows actually written. 0 on FAILED. */
   rowCount: number;
   errorMessage: string | null;
+  /**
+   * D-222 completeness warning: the rows are valid but the day looks incomplete, most
+   * likely exported before HR's clock data finished syncing. Independent of
+   * `errorMessage`, which stays null on a clean SUCCESS.
+   */
+  warningMessage: string | null;
+  /**
+   * Measured share of unexplained zero-hour rows, 0..1. Null when the export lacked the
+   * columns to measure it, held no rows, or the import failed.
+   */
+  unexplainedZeroRatio: number | null;
+  /**
+   * D-229: rows this import marked superseded, i.e. rows HR deleted since the earlier
+   * fetch of the same day. 0 on FAILED, and also 0 when the sharp-drop guard suppressed
+   * supersede - so 0 does not prove nothing was removed; read `errorMessage` too.
+   */
+  supersededCount: number;
   triggeredBy: ImportTrigger;
 }
 
@@ -275,5 +385,14 @@ export interface ImportLogInput {
   rowCount?: number;
   /** Failure summary. Required in practice on FAILED/PARTIAL; blank normalises to null. */
   errorMessage?: string | null;
+  /** D-222 completeness warning; blank normalises to null. Never set on FAILED. */
+  warningMessage?: string | null;
+  /** Measured unexplained-zero ratio, 0..1, recorded even when no warning fired. */
+  unexplainedZeroRatio?: number | null;
+  /**
+   * D-229: rows this import superseded. Must be 0 when status is "FAILED" - the write
+   * runs in one transaction, so a failure rolled the supersede back too.
+   */
+  supersededCount?: number;
   triggeredBy: ImportTrigger;
 }

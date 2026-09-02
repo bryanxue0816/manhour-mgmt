@@ -34,11 +34,14 @@ export function AppShell({
       <header className="border-b bg-card px-6 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-6">
-            <h1 className="text-lg font-semibold">工时管控台</h1>
+            <h1 className="text-lg font-semibold">DMWX管间工时管理系统</h1>
             {nav}
           </div>
           <span className="text-xs text-muted-foreground">
-            {fiscalYearLabel} · 内网免登录
+            {/* No longer "内网免登录": the dashboard is public, but every other screen
+                and every write now needs the admin password. Saying "免登录" here would
+                describe the whole system, and would be wrong. */}
+            {fiscalYearLabel} · 只读看板
           </span>
         </div>
         {breadcrumb}

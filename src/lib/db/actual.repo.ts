@@ -5,7 +5,9 @@
 // cross-section or cross-month total is folded by pure TypeScript in the
 // aggregation layer - testable without a database, and portable to PostgreSQL.
 
+import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { ACTUAL_SOURCE_MANUAL, assertActualSource } from "./actual-source";
 import { assertFiscalMonth } from "./date";
 import { assertFiniteHours } from "./hours";
 import type { ActualRow, ActualUpsertInput } from "./types";
@@ -18,6 +20,7 @@ interface ActualRecord {
   personnelHours: number;
   overtimeHours: number;
   totalHours: number;
+  source: string;
 }
 const ACTUAL_ROW_SELECT = {
   sectionId: true,
@@ -26,9 +29,18 @@ const ACTUAL_ROW_SELECT = {
   personnelHours: true,
   overtimeHours: true,
   totalHours: true,
+  source: true,
 } as const;
 
-/** Maps a database record to the persistence-layer DTO. */
+/**
+ * Maps a database record to the persistence-layer DTO.
+ *
+ * `source` is asserted rather than passed through (D-198). SQLite has no enum, so the
+ * column can hold any string; a value outside the vocabulary would make every
+ * `source === "manual"` test on the read side answer false, and a hand-typed baseline
+ * would then render as if the attendance import had produced it - which is exactly the
+ * claim the marker exists to avoid making.
+ */
 function toActualRow(record: ActualRecord): ActualRow {
   return {
     sectionId: record.sectionId,
@@ -37,6 +49,7 @@ function toActualRow(record: ActualRecord): ActualRow {
     personnelHours: record.personnelHours,
     overtimeHours: record.overtimeHours,
     totalHours: record.totalHours,
+    source: assertActualSource(record.source),
   };
 }
 
@@ -86,12 +99,10 @@ function assertActualInput(input: ActualUpsertInput): void {
  * Assumes assertActualInput() has already run.
  */
 function actualUpsertArgs(input: ActualUpsertInput) {
-  const mutable = {
+  const hours = {
     personnelHours: input.personnelHours,
     overtimeHours: input.overtimeHours,
     totalHours: resolveTotalHours(input),
-    sourceFile: input.sourceFile ?? null,
-    fetchedAt: input.fetchedAt ?? null,
   };
   const key = {
     sectionId: input.sectionId,
@@ -100,8 +111,23 @@ function actualUpsertArgs(input: ActualUpsertInput) {
   };
   return {
     where: { sectionId_fiscalYearId_month: key },
-    create: { ...key, ...mutable },
-    update: mutable,
+    // `?? null` on create only: a new row needs a concrete column value.
+    create: {
+      ...key,
+      ...hours,
+      sourceFile: input.sourceFile ?? null,
+      fetchedAt: input.fetchedAt ?? null,
+    },
+    // Forwarded verbatim on update so `undefined` leaves the stored provenance alone
+    // and only an explicit `null` clears it - the convention org/config/work-calendar
+    // already follow. Coercing here would let any recompute that does not resupply
+    // sourceFile (e.g. a JobTitleRule change re-deriving hours) blank out which file
+    // the month came from: the numbers change, the trail vanishes, nothing errors.
+    update: {
+      ...hours,
+      sourceFile: input.sourceFile,
+      fetchedAt: input.fetchedAt,
+    },
     select: { id: true },
   };
 }
@@ -109,11 +135,23 @@ function actualUpsertArgs(input: ActualUpsertInput) {
 /**
  * All actual rows for a fiscal year, ordered by (sectionId, month). The consuming
  * adapter indexes by key, but a stable order keeps fixtures and diffs reproducible.
+ *
+ * Returns the FOLDED figures only - adjustment slips (D-233) are a different table and do
+ * not appear here. Call sites that must show 实绩 as D-141 defines it use
+ * findEffectiveActualsByFiscalYear() instead; this one stays the plain fold so the
+ * attendance-provenance screens can still say what the import itself produced.
+ *
+ * @param client - client to read through, defaulting to the global one. Supplied by
+ *   findEffectiveActualsByFiscalYear() so the folded rows and the slips come out of ONE
+ *   snapshot: read independently, a re-fold landing between the two queries would compare
+ *   a slip's recorded base against a `totalHours` from a different instant and raise a
+ *   drift warning for a section-month that never drifted.
  */
 export async function findActualsByFiscalYear(
   fiscalYearId: string,
+  client: Prisma.TransactionClient = prisma,
 ): Promise<ActualRow[]> {
-  const records = await prisma.actual.findMany({
+  const records = await client.actual.findMany({
     where: { fiscalYearId },
     select: ACTUAL_ROW_SELECT,
     orderBy: [{ sectionId: "asc" }, { month: "asc" }],
@@ -185,4 +223,27 @@ export async function countActualsByFiscalYear(
   fiscalYearId: string,
 ): Promise<number> {
   return prisma.actual.count({ where: { fiscalYearId } });
+}
+
+/**
+ * Fiscal months (1 = April) in which at least one figure was typed in by hand.
+ *
+ * Exists so the dashboard can caption its own numbers without loading every actual row
+ * and without a literal month list in the JSX: the months that predate go-live are a
+ * property of the data, and a hard-coded 「4~7 月」 footnote silently becomes wrong the
+ * first time 8月 is back-filled the same way (D-198).
+ *
+ * `distinct` rather than a groupBy: only the month set is needed, and the caller sorts
+ * nothing - the ascending order comes from the query so two callers cannot disagree.
+ */
+export async function findManualBaselineMonthsByFiscalYear(
+  fiscalYearId: string,
+): Promise<readonly number[]> {
+  const rows = await prisma.actual.findMany({
+    where: { fiscalYearId, source: ACTUAL_SOURCE_MANUAL },
+    select: { month: true },
+    distinct: ["month"],
+    orderBy: { month: "asc" },
+  });
+  return rows.map((row) => row.month);
 }

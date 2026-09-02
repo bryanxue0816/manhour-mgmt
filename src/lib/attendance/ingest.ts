@@ -29,11 +29,12 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import {
-  parseAttendanceWorkbook,
+  parseAttendanceFile,
   type AttendanceProblem,
 } from "@/lib/attendance/parser";
 import {
   classifyAttendanceParse,
+  joinWarnings,
   type AttendanceVerdict,
 } from "@/lib/attendance/verdict";
 import {
@@ -47,13 +48,17 @@ import { appendImportLog, hasSuccessfulImport } from "@/lib/db/import-log.repo";
 import type { ImportStatus, ImportTrigger } from "@/lib/db/types";
 
 /**
- * Workbook extensions accepted from the source directory.
+ * File extensions accepted from the source directory.
  *
  * D-120 promises `attendance_YYYYMMDD.xls` "或类似格式", so the extension is the filter
  * rather than the full name pattern: a stricter regex would silently skip a renamed but
  * perfectly valid export, and a skipped file looks exactly like a file HR never wrote.
+ *
+ * `.csv` was added by D-221 for exactly that reason - HR's export switched to CSV, and
+ * until this list knew the extension the auto-fetch path skipped every report without
+ * writing an `import_log` row, which is indistinguishable from an empty share.
  */
-const WORKBOOK_EXTENSIONS = [".xls", ".xlsx"] as const;
+const ATTENDANCE_EXTENSIONS = [".xls", ".xlsx", ".csv"] as const;
 
 /**
  * Excel writes a `~$name.xls` lock file next to an open workbook. It is a few hundred
@@ -76,6 +81,33 @@ export interface IngestResult {
   problems: readonly AttendanceProblem[];
   /** Human-readable failure summary, exactly as stored. Null on SUCCESS. */
   errorMessage: string | null;
+  /**
+   * D-222 completeness warnings, exactly as stored. Empty when the day looks complete.
+   *
+   * Never affects `status` - 只告警不拦截. The rows are valid and re-importing the same
+   * day overwrites them, so refusing them would discard real hours to complain about
+   * absent ones.
+   */
+  warnings: readonly string[];
+  /** Measured unexplained-zero ratio, 0..1, or null when unmeasurable. */
+  unexplainedZeroRatio: number | null;
+  /**
+   * D-229: rows marked superseded because HR deleted them since the earlier fetch.
+   *
+   * Reported separately from `rowsStored`, which counts rows WRITTEN. Without this, a
+   * fetch that removed three people's day is indistinguishable from one that changed
+   * nothing - the audit page would show two clean SUCCESS rows and no sign of the
+   * reduction that moved the monthly total.
+   */
+  supersededCount: number;
+  /**
+   * Rows the file held but D-103 excluded (员工类别 ∉ {管理职, 管间人员}).
+   *
+   * Reported alongside `rowsStored` so the operator can reconcile the two numbers against
+   * the file they just uploaded. Without it, a correct import of a 577-row export storing
+   * 180 rows reads as having lost two thirds of the data.
+   */
+  categoryFilteredRows: number;
   /** id of the appended import_log row, or null if even the log write failed. */
   logId: string | null;
   /** True for a rest-day report: parsed cleanly, no employee rows (D-170). */
@@ -112,15 +144,65 @@ export interface InspectResult {
  */
 function verdictOutcome(
   verdict: AttendanceVerdict,
-  written: { rowsStored: number; months: readonly MonthRebuildResult[] },
+  written: {
+    rowsStored: number;
+    months: readonly MonthRebuildResult[];
+    supersededCount?: number;
+    supersedeSkipped?: readonly string[];
+  },
 ): Omit<IngestResult, "fileName" | "fileMtime" | "logId"> {
+  // D-229: the sharp-drop guard fired, so rows HR removed are knowingly still counted.
+  // The write itself succeeded, which is why this is PARTIAL and not FAILED - but it must
+  // not be SUCCESS either, or the scheduler's exit code and the D-124 staleness banner
+  // would both report the day as reconciled when it is not. Like the write-failure FAILED
+  // above, this verdict cannot come from the pure classifier: whether a file is a sharp
+  // drop depends on what is already stored, which the upload preview cannot know.
+  const skipped = written.supersedeSkipped ?? [];
+  const guardFired = skipped.length > 0;
   return {
-    status: verdict.status,
+    status: guardFired ? "PARTIAL" : verdict.status,
     rowsStored: written.rowsStored,
     months: written.months,
     problems: verdict.problems,
-    errorMessage: verdict.errorMessage,
+    // Not merged with verdict.errorMessage: boundary 1 means only a SUCCESS can reach the
+    // supersede pass, and a SUCCESS always carries a null errorMessage. Rendered through
+    // joinWarnings so the wording matches every other multi-message column.
+    errorMessage: guardFired ? joinWarnings(skipped) : verdict.errorMessage,
+    warnings: verdict.warnings,
+    unexplainedZeroRatio: verdict.unexplainedZeroRatio,
+    supersededCount: written.supersededCount ?? 0,
+    categoryFilteredRows: verdict.categoryFilteredRows,
     isRestDay: verdict.isRestDay,
+  };
+}
+
+/**
+ * The outcome for a failure that is NOT a property of the file's bytes: an unreadable
+ * path, a write that threw.
+ *
+ * A helper rather than the four near-identical literals it replaced, because every field
+ * but the message is fixed by what FAILED means here - nothing was written, so no rows,
+ * no months, and no completeness signal that would be honest to record.
+ *
+ * `unexplainedZeroRatio` is null even at the call site where a parse DID measure one (a
+ * clean file whose write then threw). That measurement series is what will replace
+ * D-222's single-day threshold, and it has to describe days that actually landed; a file
+ * whose rows were rolled back would weight the calibration with hours nobody can read.
+ */
+function failedOutcome(
+  errorMessage: string,
+): Omit<IngestResult, "fileName" | "fileMtime" | "logId"> {
+  return {
+    status: "FAILED",
+    rowsStored: 0,
+    months: [],
+    problems: [],
+    errorMessage,
+    warnings: [],
+    unexplainedZeroRatio: null,
+    supersededCount: 0,
+    categoryFilteredRows: 0,
+    isRestDay: false,
   };
 }
 
@@ -156,6 +238,12 @@ async function finish(
       status: outcome.status,
       rowCount: outcome.rowsStored,
       errorMessage: outcome.errorMessage,
+      // Joined rather than stored as JSON: this column is read straight into a status
+      // panel, and there is exactly one warning today. A second one gets a separator, not
+      // a schema change.
+      warningMessage: joinWarnings(outcome.warnings),
+      unexplainedZeroRatio: outcome.unexplainedZeroRatio,
+      supersededCount: outcome.supersededCount,
       triggeredBy: source.triggeredBy,
     });
     return { ...base, logId: log.id };
@@ -181,7 +269,7 @@ async function finish(
 export function inspectAttendanceSource(
   source: Pick<AttendanceSource, "buffer" | "fileName">,
 ): InspectResult {
-  const parsed = parseAttendanceWorkbook(source.buffer);
+  const parsed = parseAttendanceFile(source.fileName, source.buffer);
   const verdict = classifyAttendanceParse(parsed);
   const months = parsed.ok ? affectedMonthsOf(parsed.parsed.rows) : [];
   const workDates = parsed.ok
@@ -210,7 +298,7 @@ export function inspectAttendanceSource(
 export async function ingestAttendanceSource(
   source: AttendanceSource,
 ): Promise<IngestResult> {
-  const parsed = parseAttendanceWorkbook(source.buffer);
+  const parsed = parseAttendanceFile(source.fileName, source.buffer);
   const verdict = classifyAttendanceParse(parsed);
 
   if (!parsed.ok) {
@@ -226,20 +314,16 @@ export async function ingestAttendanceSource(
       parsed.parsed.rows,
       source.fileName,
       new Date(),
+      {
+        // D-229 boundary 1: only a clean parse may supersede. A PARTIAL file is missing
+        // rows for reasons we could not explain, so treating it as the day's authoritative
+        // snapshot would delete real hours on the strength of a file we already distrust.
+        supersedeMissing: verdict.status === "SUCCESS",
+      },
     );
-    return finish(
-      source,
-      verdictOutcome(verdict, { rowsStored: result.rowsStored, months: result.months }),
-    );
+    return finish(source, verdictOutcome(verdict, result));
   } catch (error) {
-    return finish(source, {
-      status: "FAILED",
-      rowsStored: 0,
-      months: [],
-      problems: [],
-      errorMessage: `入库失败：${describeError(error)}`,
-      isRestDay: false,
-    });
+    return finish(source, failedOutcome(`入库失败：${describeError(error)}`));
   }
 }
 
@@ -267,28 +351,14 @@ export async function ingestAttendanceFile(
     if (!stats.isFile()) {
       return finish(
         { fileName, fileMtime: null, triggeredBy },
-        {
-          status: "FAILED",
-          rowsStored: 0,
-          months: [],
-          problems: [],
-          errorMessage: `路径不是文件：${filePath}`,
-          isRestDay: false,
-        },
+        failedOutcome(`路径不是文件：${filePath}`),
       );
     }
     fileMtime = stats.mtime;
   } catch (error) {
     return finish(
       { fileName, fileMtime: null, triggeredBy },
-      {
-        status: "FAILED",
-        rowsStored: 0,
-        months: [],
-        problems: [],
-        errorMessage: `无法读取文件属性（文件可能尚未生成）：${describeError(error)}`,
-        isRestDay: false,
-      },
+      failedOutcome(`无法读取文件属性（文件可能尚未生成）：${describeError(error)}`),
     );
   }
 
@@ -298,14 +368,7 @@ export async function ingestAttendanceFile(
   } catch (error) {
     return finish(
       { fileName, fileMtime, triggeredBy },
-      {
-        status: "FAILED",
-        rowsStored: 0,
-        months: [],
-        problems: [],
-        errorMessage: `文件存在但无法读取：${describeError(error)}`,
-        isRestDay: false,
-      },
+      failedOutcome(`文件存在但无法读取：${describeError(error)}`),
     );
   }
 
@@ -326,11 +389,11 @@ export interface DirectoryScanResult {
   errorMessage: string | null;
 }
 
-/** True for a real workbook, excluding Excel's `~$` lock files. */
+/** True for a real attendance report, excluding Excel's `~$` lock files. */
 function isWorkbookName(name: string): boolean {
   if (name.startsWith(LOCK_FILE_PREFIX)) return false;
   const lower = name.toLowerCase();
-  return WORKBOOK_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  return ATTENDANCE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
 /**
@@ -346,9 +409,29 @@ function isWorkbookName(name: string): boolean {
  * file into the provenance trail. The condition is returned to the caller, which is what
  * exits non-zero so the operator running the backfill notices.
  *
- * The path is a parameter, never a constant: D-170 made browser upload the only routine
- * entry point, so a directory sweep is now an operator-driven backfill and the location is
- * whatever that operator points at - it comes from the argument or the environment.
+ * The path is a parameter, never a constant: it names the HR share, which differs per
+ * environment and is only known at deploy time (D-197), so it comes from the argument or
+ * the environment rather than being compiled in.
+ *
+ * D-197 restored the scheduled sweep to being a ROUTINE entry point, twice a day (09:05 and
+ * 15:05), superseding D-170's era when browser upload was the only one. D-230 then removed
+ * the outer Shell's per-day success marker, which makes `hasSuccessfulImport` above the ONLY
+ * thing standing between a repeated sweep and a re-import. It keys on the file name alone,
+ * so the whole scheme rests on D-120's uniqueness promise - upheld today because HR's export
+ * is named 日考勤数据yyMMdd_HHmm.csv and the HHmm differs between the two daily files.
+ *
+ * If that ever regresses to a fixed name, the afternoon file would be skipped as "already
+ * imported": the corrections would be dropped silently and D-229's supersede would never
+ * run. Nothing here would report it, which is exactly why it is written down.
+ *
+ * A guard was proposed for exactly that - narrow the candidate test from an extension
+ * whitelist to the precise 日考勤数据yyMMdd_HHmm.csv shape - and was REJECTED in D-232.
+ * Do not re-propose it. Two consequences are therefore accepted, deliberately:
+ *   - Any same-extension file dropped into the share is a candidate. HR does not have to
+ *     change anything for this to happen; someone adding one unrelated .csv is enough.
+ *   - `hasSuccessfulImport` accepts only SUCCESS/PARTIAL, so a permanently bad file is
+ *     retried on EVERY sweep and writes a fresh FAILED row each time. It never heals.
+ *     The remedy is to delete the file from the share, not to change this code.
  */
 export async function scanAttendanceDirectory(
   directory: string,

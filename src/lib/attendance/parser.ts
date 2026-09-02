@@ -39,6 +39,8 @@ import { read as readWorkbook, utils as xlsxUtils } from "xlsx";
 
 import { assertCalendarDay } from "@/lib/db/date";
 
+import { decodeAttendanceCsv } from "./csv";
+
 /** 出勤日期 - converted from an Excel serial, the sheet's only date column. */
 const DATE_COLUMN = "出勤日期";
 
@@ -85,6 +87,50 @@ const NUMERIC_COLUMNS = {
  * around it must be re-verified by a human before the numbers are trusted.
  */
 const PRESENCE_ONLY_COLUMNS = ["请假类别"] as const;
+
+/**
+ * Read when present, ignored when absent - the inputs to D-222's export-taken-too-early
+ * detection. Deliberately NOT added to D-125's required list.
+ *
+ * These columns feed a WARNING, not the import itself, so HR dropping one must degrade
+ * the warning rather than reject a day's data. mapHeader() indexes every column it finds,
+ * which is what makes an optional lookup possible without touching the required set.
+ */
+const ON_ROLL_COLUMN = "在职";
+const ON_LEAVE_COLUMN = "是否休假";
+const EXCEPTION_COLUMN = "异常情况";
+
+/** The 在职 / 是否休假 value meaning "yes". Both columns are 是/否 in the real export. */
+const YES_TEXT = "是";
+const NO_TEXT = "否";
+
+/** The 异常情况 value HR writes when the clock-out punch is missing. */
+const NO_CLOCK_OUT_TEXT = "无下班打卡记录";
+
+/**
+ * D-103: the only two 员工类别 values this system counts. Every other value is dropped
+ * whole-row - this report is 管间总劳动时间 by definition, and direct labour belongs to a
+ * different report entirely.
+ *
+ * Measured on the real full-scope export: 397 of 577 rows (68.8%) carry 直接人员, worth
+ * 3032 of 4436 personnel hours (68.3%). Until this filter existed those hours were folded
+ * into 实绩 and inflated it ~3x, which silently consumed D-141's 剩余 = 计划 − 实绩.
+ *
+ * 员工类别 is a D-125 required column (see TEXT_COLUMNS), so this filter cannot fail open:
+ * a sheet without the column is rejected upstream rather than reaching here unfiltered.
+ */
+const KEPT_EMPLOYEE_CATEGORIES: ReadonlySet<string> = new Set(["管理职", "管间人员"]);
+
+/**
+ * Out-of-scope categories known to be normal, dropped without a warning.
+ *
+ * The distinction from "any other value" is the entire point. At ~69% of every file,
+ * warning on 直接人员 would fire on every healthy import and train the operator to ignore
+ * the banner. A value in NEITHER list means HR may have renamed or added a category, and a
+ * silently dropped new category is precisely D-222's failure mode: a clean-looking import
+ * that is quietly missing people. That case warns.
+ */
+const EXPECTED_EXCLUDED_CATEGORIES: ReadonlySet<string> = new Set(["直接人员"]);
 
 type NumericField = (typeof NUMERIC_COLUMNS)[keyof typeof NUMERIC_COLUMNS];
 
@@ -176,6 +222,68 @@ export interface ParsedAttendance {
   workDates: readonly Date[];
   /** Blank-工号 rows dropped, i.e. the totals row - normally exactly 1. */
   droppedRows: number;
+  /**
+   * Rows removed by D-103's 员工类别 filter (see KEPT_EMPLOYEE_CATEGORIES).
+   *
+   * Always present, including when every row was filtered out: a file holding nothing but
+   * 直接人员 parses to zero rows, and the caller must be able to tell that apart from a
+   * rest-day report.
+   */
+  categoryFilter: CategoryFilterOutcome;
+  /**
+   * Measurements that say whether the file looks like a FINISHED day (D-222).
+   *
+   * Null for a rest-day report (no rows, so no denominator). Every count is over kept
+   * rows only, so it shares the denominator the import itself uses.
+   */
+  qualitySignals: AttendanceQualitySignals | null;
+}
+
+/**
+ * How complete the day's clock data looks - the D-222 inputs, measured, not judged.
+ *
+ * The failure this exists to catch: HR exports the daily report BEFORE the clock machines
+ * have finished syncing. Such a file parses cleanly, classifies SUCCESS, holds the right
+ * number of rows, and is simply missing hours. Measured on one real day, the same date
+ * exported early vs. final: 2820 h vs. 4010 h - 1190 h (29.7%) absent with no error
+ * anywhere. Nothing in the structural checks can see it; only the ratios below can.
+ *
+ * Judgement lives in verdict.ts. This module reports what the bytes say and stops.
+ */
+export interface AttendanceQualitySignals {
+  /** Kept rows these counts are measured over. Never 0 when this object is present. */
+  totalRows: number;
+  /**
+   * On-roll, not on leave, no leave hours booked, and yet zero 上班时数 - a person who
+   * should have hours and has none. The signature of an early export.
+   *
+   * Measured on the same real day: 21/577 (3.6%) in the final export, 156/180 (86.7%) in
+   * the early one. Null when 在职 or 是否休假 is absent from the sheet.
+   */
+  unexplainedZeroRows: number | null;
+  /**
+   * Rows HR flagged 无下班打卡记录. Corroborating evidence, not the trigger: the same day
+   * measured 7 final vs. 144 early. Null when 异常情况 is absent from the sheet.
+   */
+  noClockOutRows: number | null;
+}
+
+/**
+ * What D-103's employee-category filter removed from this file.
+ *
+ * Kept separate from `droppedRows` deliberately: verdict.ts subtracts EXPECTED_DROPPED_ROWS
+ * from that field and reports whatever is left as PARTIAL with the message
+ * 「因缺少工号被跳过」. Folding ~69% of every file into it would make every healthy import
+ * PARTIAL and state a false reason for it.
+ */
+export interface CategoryFilterOutcome {
+  /** Rows removed by the filter, expected and unexpected together. */
+  removedRows: number;
+  /**
+   * Row count per category value that appears in neither list - values nobody has ruled on
+   * yet. The empty-string key holds rows whose 员工类别 cell was blank.
+   */
+  unexpectedCategories: ReadonlyMap<string, number>;
 }
 
 export type ParseAttendanceResult =
@@ -359,12 +467,62 @@ function readHourCell(
 }
 
 /**
- * Converts an Excel 1900 serial into a calendar day at UTC midnight.
+ * A date written as text: "2026-08-25", or "2026-08-25 00:00:00.000" as SQL Server's
+ * client prints it. Slashes are accepted because a re-save through Excel produces them.
+ */
+const TEXT_DATE =
+  /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/;
+
+/**
+ * Reads a text-form date, or returns "notText" to let the serial path try instead.
  *
- * Returns null and logs when the cell is not a usable serial. A fractional serial is
- * rejected rather than truncated: it means the column carries a timestamp, and
- * silently dropping the time would make two readings of "the same day" disagree
- * depending on the reader's time zone - the trap lib/db/date.ts documents at length.
+ * The CSV export (D-221) writes 出勤日期 as "2026-08-25 00:00:00.000". Number() gives NaN
+ * for that, so without this branch every row of a CSV would be rejected as "not a date
+ * serial" - a message that would send the operator looking for a formatting problem in a
+ * file that is perfectly well-formed.
+ */
+function readTextDate(raw: string): { date: Date } | { error: string } | "notText" {
+  const match = TEXT_DATE.exec(raw);
+  if (match === null) {
+    return "notText";
+  }
+
+  const [, year, month, day, hour, minute, second, fraction] = match;
+  // Same policy as the fractional-serial branch below: a real time of day is refused, not
+  // truncated. Dropping it would make two readings of "the same day" disagree by time
+  // zone, which is the trap lib/db/date.ts documents at length.
+  const timeParts = [hour, minute, second, fraction];
+  if (timeParts.some((part) => part !== undefined && Number(part) !== 0)) {
+    return {
+      error:
+        `${DATE_COLUMN} 的值"${raw}"含时间部分。本系统按"日"归集工时,` +
+        "请把该列格式改为纯日期后重新导出。",
+    };
+  }
+
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(day);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  // Date.UTC normalises silently: Date.UTC(2026, 1, 30) is March 2nd. Without this
+  // round-trip the row would import against a day that was never in the export.
+  if (
+    date.getUTCFullYear() !== y ||
+    date.getUTCMonth() !== m - 1 ||
+    date.getUTCDate() !== d
+  ) {
+    return { error: `${DATE_COLUMN} 的值"${raw}"不是真实存在的日期。` };
+  }
+
+  return { date };
+}
+
+/**
+ * Converts a date cell into a calendar day at UTC midnight.
+ *
+ * Handles both forms the two intake paths produce: an Excel 1900 serial from .xls, and
+ * text from CSV. Returns null and logs when the cell is usable as neither. A fractional
+ * serial is rejected rather than truncated, for the reason readTextDate() explains.
  */
 function readDateCell(
   grid: readonly unknown[][],
@@ -373,12 +531,45 @@ function readDateCell(
   log: ProblemLog,
 ): Date | null {
   const value = cellOf(grid, r, c);
-  const serial = typeof value === "number" ? value : Number(String(value).trim());
+  const raw = String(value).trim();
 
-  if (String(value).trim() === "" || !Number.isFinite(serial)) {
+  if (raw === "") {
     log.add(
       cellRef(r, c),
-      `${DATE_COLUMN} 为空或不是日期序列值。该行无法确定归属日期,不予导入。`,
+      `${DATE_COLUMN} 为空。该行无法确定归属日期,不予导入。`,
+    );
+    return null;
+  }
+
+  // Only text cells are candidates; a numeric cell is always a serial. Tried before the
+  // serial path because the serial path would misread "2026-08-25 00:00:00.000" as NaN.
+  if (typeof value !== "number") {
+    const textual = readTextDate(raw);
+    if (textual !== "notText") {
+      if ("error" in textual) {
+        log.add(cellRef(r, c), textual.error);
+        return null;
+      }
+      try {
+        return assertCalendarDay(textual.date);
+      } catch (error) {
+        log.add(
+          cellRef(r, c),
+          `${DATE_COLUMN} 无法换算为日期：` +
+            (error instanceof Error ? error.message : String(error)),
+        );
+        return null;
+      }
+    }
+  }
+
+  const serial = typeof value === "number" ? value : Number(raw);
+
+  if (!Number.isFinite(serial)) {
+    log.add(
+      cellRef(r, c),
+      `${DATE_COLUMN} 的值"${raw}"既不是日期序列值也不是可识别的日期文本。` +
+        "该行无法确定归属日期,不予导入。",
     );
     return null;
   }
@@ -506,12 +697,89 @@ export function parseAttendanceWorkbook(buffer: Buffer): ParseAttendanceResult {
     raw: true,
   });
 
+  const mergedRows = mergedRowFlags(sheet["!merges"] ?? [], grid.length);
+  return parseGrid(grid, mergedRows, log);
+}
+
+/**
+ * Reads one day of attendance from a .csv export (D-221).
+ *
+ * Shares every row-level rule with the .xls path by handing the decoded grid to
+ * parseGrid(), so the two formats cannot drift apart in what they accept.
+ */
+export function parseAttendanceCsvFile(buffer: Buffer): ParseAttendanceResult {
+  const log = new ProblemLog();
+
+  let decoded: ReturnType<typeof decodeAttendanceCsv>;
+  try {
+    decoded = decodeAttendanceCsv(buffer);
+  } catch (error) {
+    // decodeAttendanceCsv only throws for a runtime without a GBK decoder. Surfacing its
+    // message verbatim keeps "fix the server" distinct from "re-export the file".
+    return {
+      ok: false,
+      problems: [
+        { where: null, message: error instanceof Error ? error.message : String(error) },
+      ],
+    };
+  }
+
+  if (!decoded.ok) {
+    return { ok: false, problems: decoded.problems };
+  }
+
+  if (decoded.grid.length > MAX_GRID_ROWS) {
+    return {
+      ok: false,
+      problems: [
+        {
+          where: null,
+          message:
+            `文件有 ${decoded.grid.length} 行,超过上限 ${MAX_GRID_ROWS} 行。` +
+            "这不像一天的考勤数据,请确认导出范围。",
+        },
+      ],
+    };
+  }
+
+  // No merge flags: a CSV cannot express a merged range, so the check parseGrid() runs for
+  // workbooks has nothing to find here. An empty array reads as false at every index.
+  return parseGrid(decoded.grid, [], log);
+}
+
+/**
+ * Parses one day's attendance file, dispatching on the extension.
+ *
+ * The extension is the only available signal - a CSV has no magic number - which is why
+ * upload-guard.ts asserts the mandatory column names for .csv instead of a signature.
+ */
+export function parseAttendanceFile(
+  fileName: string,
+  buffer: Buffer,
+): ParseAttendanceResult {
+  return fileName.toLowerCase().endsWith(".csv")
+    ? parseAttendanceCsvFile(buffer)
+    : parseAttendanceWorkbook(buffer);
+}
+
+/**
+ * Row-level parsing shared by both intake formats.
+ *
+ * Enforces all 18 D-125 mandatory columns present and unambiguous; no merged range over a
+ * kept row; a usable date and finite hours in every kept row; and no repeated
+ * (工号, 出勤日期) pair.
+ *
+ * @param mergedRows per-row merge flags; pass an empty array for formats without merges.
+ */
+function parseGrid(
+  grid: readonly unknown[][],
+  mergedRows: readonly boolean[],
+  log: ProblemLog,
+): ParseAttendanceResult {
   const columns = mapHeader(grid, log);
   if (columns === null) {
     return { ok: false, problems: log.take() };
   }
-
-  const mergedRows = mergedRowFlags(sheet["!merges"] ?? [], grid.length);
 
   /**
    * Column index by header name.
@@ -530,10 +798,22 @@ export function parseAttendanceWorkbook(buffer: Buffer): ParseAttendanceResult {
   const noColumn = at(NO_COLUMN);
   const dateColumn = at(DATE_COLUMN);
 
+  // Optional by design (D-222): resolved through columns.get() rather than at(), because
+  // at() throws on a miss - correct for a required column, wrong for one whose absence
+  // must only weaken a warning.
+  const onRollColumn = columns.get(ON_ROLL_COLUMN);
+  const onLeaveColumn = columns.get(ON_LEAVE_COLUMN);
+  const exceptionColumn = columns.get(EXCEPTION_COLUMN);
+  const canMeasureZeroHours = onRollColumn !== undefined && onLeaveColumn !== undefined;
+
   const rows: ParsedAttendanceRow[] = [];
   const seenKeys = new Set<string>();
   const dateKeys = new Map<number, Date>();
   let droppedRows = 0;
+  let categoryRemovedRows = 0;
+  const unexpectedCategories = new Map<string, number>();
+  let unexplainedZeroRows = 0;
+  let noClockOutRows = 0;
 
   for (let r = 1; r < grid.length; r += 1) {
     const employeeNo = textOf(grid, r, noColumn);
@@ -549,6 +829,24 @@ export function parseAttendanceWorkbook(buffer: Buffer): ParseAttendanceResult {
         "该行含合并单元格。合并会让被覆盖的单元格读出空值(即 0 工时)," +
           "无法确定数值归属,请取消合并后重新导出。",
       );
+      continue;
+    }
+
+    // D-103's first filter. Positioned after the merged-cell check - a row inside a merged
+    // range has unreliable cells, including this one - but BEFORE the date parse and the
+    // duplicate check, for two reasons: a row outside this system's scope must not be able
+    // to fail the whole import on a malformed date, and it must not occupy a
+    // (工号, 出勤日期) slot that would then reject the in-scope row carrying that key.
+    //
+    // at() rather than columns.get(): 员工类别 is a D-125 required column, so a miss here is
+    // a programming error worth throwing on, not an optional signal to degrade.
+    const employeeCategory = textOf(grid, r, at("员工类别")).trim();
+    if (!KEPT_EMPLOYEE_CATEGORIES.has(employeeCategory)) {
+      categoryRemovedRows += 1;
+      if (!EXPECTED_EXCLUDED_CATEGORIES.has(employeeCategory)) {
+        const seen = unexpectedCategories.get(employeeCategory) ?? 0;
+        unexpectedCategories.set(employeeCategory, seen + 1);
+      }
       continue;
     }
 
@@ -588,9 +886,27 @@ export function parseAttendanceWorkbook(buffer: Buffer): ParseAttendanceResult {
       hrDeptName: textOf(grid, r, at("部别")),
       hrSectionName: nullableText(textOf(grid, r, at("课别"))),
       jobTitle: nullableText(textOf(grid, r, at("职务"))),
-      employeeCategory: nullableText(textOf(grid, r, at("员工类别"))),
+      // Already trimmed and guaranteed to be one of KEPT_EMPLOYEE_CATEGORIES by the D-103
+      // filter above, so it can never be blank here - no nullableText() needed.
+      employeeCategory,
       ...numbers,
     });
+
+    // Quality signals, counted over kept rows only so they share the import's denominator.
+    if (
+      canMeasureZeroHours &&
+      textOf(grid, r, onRollColumn) === YES_TEXT &&
+      textOf(grid, r, onLeaveColumn) === NO_TEXT &&
+      numbers.leaveHours === 0 &&
+      numbers.workHours === 0
+    ) {
+      unexplainedZeroRows += 1;
+    }
+    if (exceptionColumn !== undefined) {
+      if (textOf(grid, r, exceptionColumn) === NO_CLOCK_OUT_TEXT) {
+        noClockOutRows += 1;
+      }
+    }
   }
 
   if (log.length > 0) {
@@ -608,5 +924,25 @@ export function parseAttendanceWorkbook(buffer: Buffer): ParseAttendanceResult {
   // with no rows means the file parsed cleanly and simply has nothing to say. The
   // caller sees rows: [] and decides what to log; see classifyAttendanceParse().
   const workDates = [...dateKeys.values()].sort((a, b) => a.getTime() - b.getTime());
-  return { ok: true, parsed: { rows, workDates, droppedRows } };
+  const qualitySignals: AttendanceQualitySignals | null =
+    rows.length === 0
+      ? null
+      : {
+          totalRows: rows.length,
+          unexplainedZeroRows: canMeasureZeroHours ? unexplainedZeroRows : null,
+          noClockOutRows: exceptionColumn === undefined ? null : noClockOutRows,
+        };
+  return {
+    ok: true,
+    parsed: {
+      rows,
+      workDates,
+      droppedRows,
+      categoryFilter: {
+        removedRows: categoryRemovedRows,
+        unexpectedCategories,
+      },
+      qualitySignals,
+    },
+  };
 }

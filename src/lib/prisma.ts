@@ -12,7 +12,20 @@ const globalForPrisma = globalThis as unknown as {
 };
 
 function createPrismaClient(): PrismaClient {
-  const adapter = new PrismaBetterSqlite3({ url: process.env.DATABASE_URL });
+  const url = process.env.DATABASE_URL;
+  // Fail fast with a message that names the cause. The adapter's own failure mode is
+  // `TypeError: Cannot read properties of undefined (reading 'replace')` from deep
+  // inside its dist bundle, which says nothing about a missing variable - and `.env`
+  // is gitignored, so a fresh clone hits this every time. The `url` field types as
+  // `string | (string & {})` rather than rejecting undefined (better-sqlite3 ships no
+  // types, so the adapter's Options widen to any), meaning tsc will not catch it.
+  if (!url) {
+    throw new Error(
+      "DATABASE_URL is not set. Copy .env.example to .env and set it; " +
+        "for the standalone build it must be an ABSOLUTE path (see D-188).",
+    );
+  }
+  const adapter = new PrismaBetterSqlite3({ url });
   return new PrismaClient({ adapter });
 }
 

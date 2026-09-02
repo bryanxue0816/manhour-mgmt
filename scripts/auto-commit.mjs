@@ -66,6 +66,9 @@ const SECRET_CONTENT_ALLOWLIST = [
   /<[^>]*>/,
   /\bxxx+\b/i,
   /replace[_-]?this/i,
+  // Generic literals used in example connection strings, e.g. "user:password@host".
+  // Narrow on purpose: only the literal words, never a real-looking credential.
+  /:(password|passwd|pass|pwd|secret)@/i,
 ];
 
 function git(args, options = {}) {

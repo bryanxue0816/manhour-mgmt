@@ -75,7 +75,13 @@ describe("checkUploadCandidate", () => {
   });
 
   it("refuses a name with no accepted extension", () => {
-    expect(messageOf(checkUploadCandidate(candidate({ name: "考勤.csv" })))).toContain(".xls");
+    expect(messageOf(checkUploadCandidate(candidate({ name: "考勤.pdf" })))).toContain(".xls");
+  });
+
+  it("accepts the .csv HR now exports (D-221)", () => {
+    expect(checkUploadCandidate(candidate({ name: "日考勤数据 1.csv", size: 77_600 })).ok).toBe(
+      true,
+    );
   });
 
   it("refuses an empty name - provenance would have nothing to record", () => {
@@ -181,7 +187,33 @@ describe("checkWorkbookSignature", () => {
   });
 
   it("refuses an unrecognised extension without looking at the bytes", () => {
-    expect(messageOf(checkWorkbookSignature("考勤.csv", bytesOf(OLE2_MAGIC)))).toContain(".xls");
+    expect(messageOf(checkWorkbookSignature("考勤.txt", bytesOf(OLE2_MAGIC)))).toContain(".csv");
+  });
+
+  it("accepts plain text behind a .csv name (D-221)", () => {
+    // A CSV has no signature to match, so the only thing the guard can prove is the
+    // absence of a workbook container. Whether this text really is an attendance report
+    // is decided further in, by the header check in csv.ts.
+    const csv = new TextEncoder().encode("工号,姓名,出勤日期\r\n100028,张三,2026-08-25\r\n");
+    expect(checkWorkbookSignature("日考勤数据 1.csv", csv)).toEqual({ ok: true });
+  });
+
+  it("accepts a .csv too short to hold any signature", () => {
+    // The length floor belongs to the workbook branch only. An almost-empty CSV is a file
+    // problem, not a container problem, and csv.ts reports it as "文件是空的".
+    expect(checkWorkbookSignature("日考勤数据.csv", new Uint8Array([0x31])).ok).toBe(true);
+  });
+
+  it("refuses an .xls renamed to .csv and names the real format", () => {
+    // The inverted check. Without it these bytes reach the CSV decoder and come back as
+    // an encoding complaint - true of any binary, and useless to act on.
+    const message = messageOf(checkWorkbookSignature("日考勤数据.csv", bytesOf(OLE2_MAGIC)));
+    expect(message).toContain(".xls");
+    expect(message).toContain("扩展名");
+  });
+
+  it("refuses an .xlsx renamed to .csv as well", () => {
+    expect(messageOf(checkWorkbookSignature("考勤.csv", bytesOf(ZIP_MAGIC)))).toContain(".xlsx");
   });
 });
 

@@ -38,6 +38,34 @@ const FISCAL_YEAR = {
   isCurrent: true,
 } as const;
 
+/** 12 fiscal months, April..March. Named so the plan-row checks below read as intent. */
+const FISCAL_MONTHS = 12;
+
+/**
+ * Expected organisation size per D-216: 7 部 / 24 課, all in scope, no pilot subset.
+ *
+ * Deliberately literals rather than derived from the seed arrays. Deriving them would
+ * make the assertion tautological - drop a 課 from the source rows and the expectation
+ * silently drops with it. These are an independent statement of the agreed scope, so a
+ * source sheet that loses a row fails loudly instead of seeding a smaller organisation.
+ */
+const EXPECTED_DEPARTMENTS = 7;
+const EXPECTED_SECTIONS = 24;
+
+/**
+ * Fails the seed when a written count does not match the agreed scope.
+ *
+ * Without this the seed prints `276 rows (expected 288 ...)` and still exits 0: CI goes
+ * green, and the dashboard renders the missing 課 as a flat twelve months of zero -
+ * which reads as "this section has no target this year", not "the data never arrived".
+ * A wrong number that looks like a legitimate number is the failure worth blocking.
+ */
+function assertSeedCount(label: string, actual: number, expected: number): void {
+  if (actual !== expected) {
+    throw new Error(`Seed wrote ${actual} ${label}; expected ${expected}. Aborting.`);
+  }
+}
+
 /**
  * Job titles whose hours are excluded from a section's aggregate.
  *
@@ -210,13 +238,13 @@ function buildPlanInputs(
       throw new Error(`Plan row references unknown section '${key}'.`);
     }
 
-    if (row.planned.length !== 12 || row.challenge.length !== 12) {
+    if (row.planned.length !== FISCAL_MONTHS || row.challenge.length !== FISCAL_MONTHS) {
       throw new Error(
-        `Plan row '${key}' has ${row.planned.length} planned / ${row.challenge.length} challenge values; expected 12 each.`,
+        `Plan row '${key}' has ${row.planned.length} planned / ${row.challenge.length} challenge values; expected ${FISCAL_MONTHS} each.`,
       );
     }
 
-    for (let i = 0; i < 12; i += 1) {
+    for (let i = 0; i < FISCAL_MONTHS; i += 1) {
       inputs.push({
         sectionId,
         fiscalYearId,
@@ -260,6 +288,8 @@ async function main(): Promise<void> {
 
   const { deptIds, sectionIds } = await seedOrg();
   console.log(`  organisation : ${deptIds.size} departments, ${sectionIds.size} sections`);
+  assertSeedCount("departments", deptIds.size, EXPECTED_DEPARTMENTS);
+  assertSeedCount("sections", sectionIds.size, EXPECTED_SECTIONS);
 
   const fiscalYear = await upsertFiscalYear({ ...FISCAL_YEAR });
   console.log(
@@ -278,6 +308,7 @@ async function main(): Promise<void> {
   const planInputs = buildPlanInputs(fiscalYear.id, sectionIds);
   const planCount = await upsertPlansBulk(planInputs);
   console.log(`  plans        : ${planCount} rows (expected 288 = 24 sections x 12 months)`);
+  assertSeedCount("plan rows", planCount, sectionIds.size * FISCAL_MONTHS);
 
   console.log("Seed complete.");
 }

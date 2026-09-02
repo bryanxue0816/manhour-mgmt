@@ -23,6 +23,7 @@
 
 import { revalidatePath } from "next/cache";
 
+import { requireAdmin } from "@/lib/auth";
 import { FISCAL_MONTH_COUNT } from "@/lib/db/date";
 import { upsertPlanWithAudit } from "@/lib/db/plan.repo";
 import {
@@ -35,11 +36,15 @@ import {
 /**
  * Identity recorded on the row and in the audit trail.
  *
- * A constant because v1 has no account system: D-008 settles on intranet IP
- * allow-listing, and D-142 narrows the audience to 1-2 administrators. The audit
- * trail is therefore "when and what", not "who" - which is what D-143 asks for.
- * When an identity source arrives this becomes a lookup, and PlanChangeLog needs no
- * schema change to benefit.
+ * A constant because there is still no account system: D-180 added a password gate
+ * in front of every write, but the password is SHARED by all administrators - there
+ * is no user table and no role. So this is NOT identity evidence, however much it
+ * looks like one; the audit trail answers "when and what", not "who" (D-143, D-173).
+ *
+ * Note the earlier justification here cited D-008 "no login at all", which D-180
+ * overturned for the write surface - reaching /plans now requires the password.
+ * When a real identity source arrives this becomes a lookup, and PlanChangeLog needs
+ * no schema change to benefit.
  */
 const PLAN_EDITOR = "admin";
 
@@ -166,6 +171,14 @@ function toFieldErrors(
 export async function savePlanCell(
   input: SavePlanCellInput,
 ): Promise<SavePlanCellResult> {
+  // Gate first, before shape validation: an unauthorised caller must not learn which
+  // inputs this action accepts. See src/lib/auth.ts for why the check has to live here
+  // and not in middleware.
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    return reject(gate.message);
+  }
+
   const shapeError = checkShape(input);
   if (shapeError !== null) {
     return reject(shapeError);

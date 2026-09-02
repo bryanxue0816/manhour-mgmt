@@ -45,8 +45,15 @@ const LOCK_FILE_PREFIX = "~$";
  * header. The pairing is the point: it catches a `.xls` renamed to `.xlsx` in either
  * direction, which otherwise reaches the parser and fails as "unreadable workbook" -
  * a message that sends the operator looking for corruption instead of a wrong extension.
+ *
+ * `.csv` (D-221) has `magic: null` because a text file has no signature, so that half of
+ * the defence is unavailable for it. It is not simply dropped: the check inverts for CSV
+ * and refuses bytes that DO carry a workbook signature, catching an .xls renamed to .csv.
+ * What a signature would have proved - "the content really is an attendance report" - is
+ * proved further in by the header assertions in csv.ts and mapHeader(), which are
+ * stronger than any magic number because they check the columns rather than the container.
  */
-const WORKBOOK_FORMATS = [
+const ACCEPTED_FORMATS = [
   {
     extension: ".xls",
     label: "Excel 97-2003 (.xls)",
@@ -57,7 +64,16 @@ const WORKBOOK_FORMATS = [
     label: "Excel 2007+ (.xlsx)",
     magic: [0x50, 0x4b, 0x03, 0x04],
   },
+  {
+    extension: ".csv",
+    label: "CSV 文本 (.csv)",
+    magic: null,
+  },
 ] as const;
+
+/** Extensions the operator is told about, in the order they appear above. */
+const ACCEPTED_EXTENSIONS = ".xls / .xlsx / .csv";
+
 
 /**
  * Earliest mtime treated as real. The system covers FY2026 onward, so any timestamp
@@ -87,10 +103,10 @@ function formatMegabytes(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1);
 }
 
-/** Extension match, case-insensitive. Null when the name carries neither extension. */
-function formatOf(name: string): (typeof WORKBOOK_FORMATS)[number] | null {
+/** Extension match, case-insensitive. Null when the name carries none of them. */
+function formatOf(name: string): (typeof ACCEPTED_FORMATS)[number] | null {
   const lower = name.toLowerCase();
-  return WORKBOOK_FORMATS.find((format) => lower.endsWith(format.extension)) ?? null;
+  return ACCEPTED_FORMATS.find((format) => lower.endsWith(format.extension)) ?? null;
 }
 
 /**
@@ -116,7 +132,7 @@ export function checkUploadCandidate(file: UploadCandidate): GuardResult {
   if (formatOf(name) === null) {
     return {
       ok: false,
-      message: `${name}：只接受 .xls 或 .xlsx 文件。HR 导出的日考勤报表是 .xls 格式。`,
+      message: `${name}：只接受 ${ACCEPTED_EXTENSIONS} 文件。HR 导出的日考勤报表是 .csv 格式。`,
     };
   }
   if (file.size === 0) {
@@ -170,42 +186,66 @@ export function checkUploadBatch(files: readonly UploadCandidate[]): GuardResult
 /**
  * Confirms the bytes match the container the extension promised.
  *
- * This is the one check the operator cannot get wrong by accident and cannot talk their
- * way past: the extension states intent, the signature states fact. A mismatch is
- * reported as a rename rather than as corruption, because that is what it almost always
- * is - somebody saved a CSV as .xls, or renamed an .xlsx to match a colleague's file.
+ * For `.xls` / `.xlsx` this is the one check the operator cannot get wrong by accident and
+ * cannot talk their way past: the extension states intent, the signature states fact. A
+ * mismatch is reported as a rename rather than as corruption, because that is what it
+ * almost always is - somebody saved a CSV as .xls, or renamed an .xlsx to match a
+ * colleague's file.
+ *
+ * For `.csv` the test inverts. Text has no signature to match, so what is checked instead
+ * is that the bytes do NOT carry a workbook signature - an .xls renamed to .csv would
+ * otherwise reach the CSV decoder and be reported as an encoding problem, which is a true
+ * statement about a binary file and a useless one to act on.
  */
 export function checkWorkbookSignature(name: string, bytes: Uint8Array): GuardResult {
   const format = formatOf(name.trim());
   if (format === null) {
     return {
       ok: false,
-      message: `${name}：只接受 .xls 或 .xlsx 文件。`,
+      message: `${name}：只接受 ${ACCEPTED_EXTENSIONS} 文件。`,
     };
   }
+
+  /** The workbook format whose signature these bytes actually carry, if any. */
+  const signed = ACCEPTED_FORMATS.find((candidate) => {
+    return (
+      candidate.magic !== null &&
+      candidate.magic.length <= bytes.length &&
+      candidate.magic.every((byte, index) => bytes[index] === byte)
+    );
+  });
+
+  if (format.magic === null) {
+    if (signed !== undefined) {
+      return {
+        ok: false,
+        message:
+          `${name}：文件内容实际是 ${signed.label} 格式，扩展名却是 .csv。` +
+          `请把扩展名改回 ${signed.extension}，或在 Excel 中另存为 CSV 后重新上传。`,
+      };
+    }
+    // Nothing more can be asserted from the bytes alone. Whether this text really is an
+    // attendance report is decided by the header check in csv.ts and by mapHeader().
+    return OK;
+  }
+
   if (bytes.length < format.magic.length) {
     return {
       ok: false,
       message: `${name}：文件内容过短（${String(bytes.length)} 字节），不是有效的 Excel 文件。`,
     };
   }
-  const matches = format.magic.every((byte, index) => bytes[index] === byte);
-  if (!matches) {
-    const other = WORKBOOK_FORMATS.find((candidate) => {
-      return (
-        candidate.extension !== format.extension &&
-        candidate.magic.length <= bytes.length &&
-        candidate.magic.every((byte, index) => bytes[index] === byte)
-      );
-    });
-    const hint =
-      other === undefined
-        ? `文件内容既不是 .xls 也不是 .xlsx 格式，请确认这是 Excel 导出的考勤报表。`
-        : `文件内容实际是 ${other.label} 格式，扩展名被改成了 ${format.extension}。` +
-          `请把扩展名改回 ${other.extension}，或在 Excel 中打开后另存为 ${format.extension}。`;
-    return { ok: false, message: `${name}：${hint}` };
+  if (signed?.extension === format.extension) {
+    return OK;
   }
-  return OK;
+
+  const hint =
+    signed === undefined
+      ? `文件内容既不是 .xls 也不是 .xlsx 格式，请确认这是 Excel 导出的考勤报表。` +
+        `如果这是 HR 导出的 CSV 文本，请把扩展名改为 .csv 后重新上传。`
+      : `文件内容实际是 ${signed.label} 格式，扩展名被改成了 ${format.extension}。` +
+        `请把扩展名改回 ${signed.extension}，或在 Excel 中打开后另存为 ${format.extension}。`;
+  return { ok: false, message: `${name}：${hint}` };
 }
 
 /**

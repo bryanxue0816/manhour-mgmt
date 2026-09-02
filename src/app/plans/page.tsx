@@ -14,6 +14,7 @@ import type { ReactElement } from "react";
 
 import { PlanGridEditor } from "./_components/PlanGridEditor";
 import { MainNav } from "@/components/layout/MainNav";
+import { requireAdminPage } from "@/lib/auth-page";
 import { findAllFiscalYears, findCurrentFiscalYear } from "@/lib/db/fiscal-year.repo";
 import { loadOrgSnapshot } from "@/lib/db/org.repo";
 import { findPlansByFiscalYear } from "@/lib/db/plan.repo";
@@ -132,6 +133,8 @@ export default async function PlansPage({
   // be awaited.
   searchParams?: Promise<{ fy?: string }>;
 }): Promise<ReactElement> {
+  await requireAdminPage("/plans");
+
   const [years, current, snapshot, resolvedSearchParams] = await Promise.all([
     findAllFiscalYears(),
     findCurrentFiscalYear(),
@@ -155,7 +158,7 @@ export default async function PlansPage({
           <div className="flex items-center justify-between gap-6">
             <MainNav active="plans" />
             <span className="text-xs text-muted-foreground">
-              {fiscalYear === null ? "未设置财年" : fiscalYear.name} · 内网免登录
+              {fiscalYear === null ? "未设置财年" : fiscalYear.name} · 管理员已登录
             </span>
           </div>
           <div>

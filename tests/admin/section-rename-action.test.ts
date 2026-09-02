@@ -15,6 +15,11 @@
 // renameSectionWithAlias was NEVER CALLED. The messages can be reworded; a rejected
 // input that still reaches the write is a defect regardless of what it renders.
 //
+// A valid admin session is granted in beforeEach because renameSection() calls
+// requireAdmin() first (2026-08-17). Without it every case below would return
+// 需要管理员权限 and pass for the wrong reason - the validation under test would never
+// run. tests/security/action-gates.test.ts is where the ABSENT session is asserted.
+//
 // Why the repository module is only PARTIALLY mocked: `SectionRenameError` is matched
 // with `instanceof`, so the test has to hand the action the real class. A hand-rolled
 // stand-in would satisfy the test while drifting from the class the action actually
@@ -24,10 +29,15 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { grantAdminSession } from "../helpers/admin-session";
+
 const mocks = vi.hoisted(() => ({
   renameSectionWithAlias: vi.fn(),
   revalidatePath: vi.fn(),
+  cookieGet: vi.fn<(name: string) => { name: string; value: string } | undefined>(),
 }));
+
+vi.mock("next/headers", () => ({ cookies: async () => ({ get: mocks.cookieGet }) }));
 
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
 
@@ -41,6 +51,7 @@ vi.mock("@/lib/db/org.repo", async (importOriginal) => ({
 import { Prisma } from "@/generated/prisma/client";
 import { renameSection, type RenameSectionInput } from "@/app/admin/actions";
 import { SectionRenameError } from "@/lib/db/org.repo";
+import { REASON_MAX_LENGTH } from "@/lib/db/reason";
 
 const SECTION_ID = "sec-kensa";
 
@@ -58,6 +69,8 @@ beforeEach(() => {
   // assertions below would pass or fail depending on test ORDER without this.
   mocks.renameSectionWithAlias.mockReset();
   mocks.revalidatePath.mockReset();
+  mocks.cookieGet.mockReset();
+  grantAdminSession(mocks.cookieGet);
   mocks.renameSectionWithAlias.mockResolvedValue({
     id: SECTION_ID,
     departmentId: "dep-q",
@@ -75,7 +88,8 @@ describe("renameSection - accepts a valid rename", () => {
     expect(result).toEqual({ ok: true });
     // Trimmed at this layer, not the repository: alias keys are compared verbatim, so a
     // stored "検査品证课 " would never match anything typed by hand again.
-    expect(mocks.renameSectionWithAlias).toHaveBeenCalledWith(SECTION_ID, "検査品证课");
+    // Third argument is the audit reason (D-184), null when the dialog was left blank.
+    expect(mocks.renameSectionWithAlias).toHaveBeenCalledWith(SECTION_ID, "検査品证课", null);
     expect(mocks.revalidatePath).toHaveBeenCalled();
   });
 
@@ -85,7 +99,75 @@ describe("renameSection - accepts a valid rename", () => {
     const result = await renameSection(input({ nameRaw: atLimit }));
 
     expect(result.ok).toBe(true);
-    expect(mocks.renameSectionWithAlias).toHaveBeenCalledWith(SECTION_ID, atLimit);
+    expect(mocks.renameSectionWithAlias).toHaveBeenCalledWith(SECTION_ID, atLimit, null);
+  });
+});
+
+describe("renameSection - carries the optional audit reason (D-184)", () => {
+  it("passes a trimmed reason through to the snapshot", async () => {
+    const result = await renameSection(input({ reasonRaw: "  组织调整 2026H2  " }));
+
+    expect(result.ok).toBe(true);
+    expect(mocks.renameSectionWithAlias).toHaveBeenCalledWith(
+      SECTION_ID,
+      "検査品证课",
+      "组织调整 2026H2",
+    );
+  });
+
+  it.each([
+    ["an omitted reason", {}],
+    ["an explicitly undefined reason", { reasonRaw: undefined }],
+    ["a null reason", { reasonRaw: null }],
+    ["a blank reason", { reasonRaw: "" }],
+    ["a whitespace-only reason", { reasonRaw: "   " }],
+  ])("records null for %s", async (_label, overrides) => {
+    // Null rather than "": the audit page renders 未填写 for null, and an empty string
+    // stored alongside it would be a second spelling of the same absence.
+    const result = await renameSection(input(overrides));
+
+    expect(result.ok).toBe(true);
+    expect(mocks.renameSectionWithAlias).toHaveBeenCalledWith(SECTION_ID, "検査品证课", null);
+  });
+
+  it("accepts a reason at exactly the length limit", async () => {
+    const atLimit = "由".repeat(REASON_MAX_LENGTH);
+
+    const result = await renameSection(input({ reasonRaw: atLimit }));
+
+    expect(result.ok).toBe(true);
+    expect(mocks.renameSectionWithAlias).toHaveBeenCalledWith(SECTION_ID, "検査品证课", atLimit);
+  });
+
+  it.each([
+    ["an over-long reason", { reasonRaw: "由".repeat(REASON_MAX_LENGTH + 1) }],
+    ["a non-string reason", { reasonRaw: 42 as unknown as string }],
+  ])("refuses %s without writing", async (_label, overrides) => {
+    const result = await renameSection(input(overrides));
+
+    expect(result.ok).toBe(false);
+    expect(mocks.renameSectionWithAlias).not.toHaveBeenCalled();
+    if (!result.ok) {
+      // NOT a field error: "reason" is not a RenameSectionField, and the dialog caps the
+      // input at REASON_MAX_LENGTH already, so an over-long value can only arrive from a
+      // caller that is not the dialog - there is no input on screen to mark red.
+      expect(result.fieldErrors).toEqual({});
+      expect(result.message).toContain("变更原因");
+    }
+  });
+
+  it("reports the correctable name error first when both are invalid", async () => {
+    // Ordering matters: the reason guard runs last so that a genuinely fixable input
+    // error is what the operator is told about, not a limit they cannot see.
+    const result = await renameSection(
+      input({ nameRaw: "", reasonRaw: "由".repeat(REASON_MAX_LENGTH + 1) }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(mocks.renameSectionWithAlias).not.toHaveBeenCalled();
+    if (!result.ok) {
+      expect(result.fieldErrors.name).toBeTruthy();
+    }
   });
 });
 

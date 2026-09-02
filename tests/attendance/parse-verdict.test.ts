@@ -14,10 +14,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   EXPECTED_DROPPED_ROWS,
+  UNEXPLAINED_ZERO_WARN_RATIO,
   classifyAttendanceParse,
   summariseProblems,
 } from "@/lib/attendance/verdict";
 import type {
+  AttendanceQualitySignals,
+  CategoryFilterOutcome,
   ParseAttendanceResult,
   ParsedAttendanceRow,
 } from "@/lib/attendance/parser";
@@ -46,15 +49,31 @@ function row(excelRow: number): ParsedAttendanceRow {
   };
 }
 
-function parsed(rowCount: number, droppedRows: number): ParseAttendanceResult {
+function parsed(
+  rowCount: number,
+  droppedRows: number,
+  qualitySignals: AttendanceQualitySignals | null = null,
+  categoryFilter: CategoryFilterOutcome = { removedRows: 0, unexpectedCategories: new Map() },
+): ParseAttendanceResult {
   return {
     ok: true,
     parsed: {
       rows: Array.from({ length: rowCount }, (_unused, i) => row(i + 2)),
       workDates: [new Date(Date.UTC(2026, 6, 1))],
       droppedRows,
+      categoryFilter,
+      qualitySignals,
     },
   };
+}
+
+/** Quality signals for `total` rows of which `zero` are unexplained zero-hour rows. */
+function signals(
+  total: number,
+  zero: number | null,
+  noClockOut: number | null = null,
+): AttendanceQualitySignals {
+  return { totalRows: total, unexplainedZeroRows: zero, noClockOutRows: noClockOut };
 }
 
 describe("classifyAttendanceParse - rest-day report (D-170)", () => {
@@ -154,6 +173,108 @@ describe("classifyAttendanceParse - rejected workbook", () => {
     expect(verdict.errorMessage).toContain("解析失败");
     expect(verdict.errorMessage).toContain("出勤日期");
     expect(verdict.errorMessage).toContain("R5");
+  });
+});
+
+describe("classifyAttendanceParse - 导出过早告警 (D-222)", () => {
+  // The failure mode: HR exports the daily report before the clock machines finish
+  // syncing. The file parses cleanly, classifies SUCCESS, carries the right row count -
+  // and is simply missing hours. Measured on one real day: 2820 h vs 4010 h final, i.e.
+  // 1190 h (29.7%) absent with no error anywhere. These branches are the only thing in
+  // the pipeline that can see it.
+
+  it("stays silent on a healthy day (3.6% measured on the real final export)", () => {
+    const verdict = classifyAttendanceParse(parsed(577, 1, signals(577, 21, 7)));
+    expect(verdict.warnings).toEqual([]);
+    expect(verdict.status).toBe("SUCCESS");
+  });
+
+  it("warns on an early export (86.7% measured on the real early snapshot)", () => {
+    const verdict = classifyAttendanceParse(parsed(180, 1, signals(180, 156, 144)));
+    expect(verdict.warnings).toHaveLength(1);
+    expect(verdict.warnings[0]).toContain("疑似导出过早");
+    expect(verdict.warnings[0]).toContain("156");
+    expect(verdict.warnings[0]).toContain("86.7%");
+  });
+
+  it("warns on the 30% early full-scope export the old >50% 是否异常 rule would have missed", () => {
+    // The overturned threshold, pinned as a test: an early FULL export measures 30.3%
+    // anomalous by HR's own 是否异常 flag, so a >50% rule stays quiet while a third of the
+    // day's hours are gone. This ratio sees it.
+    expect(classifyAttendanceParse(parsed(577, 1, signals(577, 173, 151))).warnings).toHaveLength(1);
+  });
+
+  it("never downgrades the status - 只告警不拦截", () => {
+    // The rows are genuinely valid, and re-uploading the same day overwrites them. A
+    // FAILED here would throw away real hours to complain about the ones that are absent.
+    const verdict = classifyAttendanceParse(parsed(180, 1, signals(180, 156)));
+    expect(verdict.status).toBe("SUCCESS");
+    expect(verdict.rowCount).toBe(180);
+  });
+
+  it("keeps the warning out of errorMessage", () => {
+    // errorMessage's contract is "null on a clean SUCCESS" and callers read non-null as
+    // "something went wrong". A warning is neither, so it travels in its own field.
+    expect(classifyAttendanceParse(parsed(180, 1, signals(180, 156))).errorMessage).toBeNull();
+  });
+
+  it("fires exactly at the threshold, not just above it", () => {
+    const atThreshold = Math.round(500 * UNEXPLAINED_ZERO_WARN_RATIO);
+    expect(classifyAttendanceParse(parsed(500, 1, signals(500, atThreshold))).warnings).toHaveLength(
+      1,
+    );
+    expect(
+      classifyAttendanceParse(parsed(500, 1, signals(500, atThreshold - 1))).warnings,
+    ).toHaveLength(0);
+  });
+
+  it("records the measured ratio even on a quiet day", () => {
+    // The threshold is calibrated from ONE day. This series is what replaces it, so the
+    // measurement has to be stored whether or not it fired.
+    const verdict = classifyAttendanceParse(parsed(200, 1, signals(200, 4)));
+    expect(verdict.warnings).toEqual([]);
+    expect(verdict.unexplainedZeroRatio).toBeCloseTo(0.02, 6);
+  });
+
+  it("degrades to no warning when HR drops 在职/是否休假 rather than failing the import", () => {
+    // These columns are deliberately NOT in D-125's required list. A warning feature must
+    // never be the reason a day's real hours are rejected.
+    const verdict = classifyAttendanceParse(parsed(577, 1, signals(577, null, 151)));
+    expect(verdict.status).toBe("SUCCESS");
+    expect(verdict.warnings).toEqual([]);
+    expect(verdict.unexplainedZeroRatio).toBeNull();
+  });
+
+  it("omits the 无下班打卡记录 clause when 异常情况 is absent", () => {
+    const verdict = classifyAttendanceParse(parsed(180, 1, signals(180, 156, null)));
+    expect(verdict.warnings[0]).toContain("疑似导出过早");
+    expect(verdict.warnings[0]).not.toContain("无下班打卡记录");
+  });
+
+  it("cannot divide by zero on a rest-day report", () => {
+    // A rest day has no rows, so it has no denominator - and 0/0 would be NaN, which is
+    // neither above nor below the threshold. The warning must be absent, not undefined.
+    const verdict = classifyAttendanceParse(parsed(0, EXPECTED_DROPPED_ROWS));
+    expect(verdict.isRestDay).toBe(true);
+    expect(verdict.warnings).toEqual([]);
+    expect(verdict.unexplainedZeroRatio).toBeNull();
+  });
+
+  it("reports no warning on a rejected file", () => {
+    const verdict = classifyAttendanceParse({
+      ok: false,
+      problems: [{ where: null, message: "缺少必需列：出勤日期" }],
+    });
+    expect(verdict.warnings).toEqual([]);
+    expect(verdict.unexplainedZeroRatio).toBeNull();
+  });
+
+  it("still warns on a PARTIAL - the two conditions are independent", () => {
+    // A file can both drop an employee row for a blank 工号 AND be exported too early.
+    // Reporting only the first would send the operator chasing the wrong repair.
+    const verdict = classifyAttendanceParse(parsed(179, 3, signals(179, 156)));
+    expect(verdict.status).toBe("PARTIAL");
+    expect(verdict.warnings).toHaveLength(1);
   });
 });
 

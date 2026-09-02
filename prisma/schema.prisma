@@ -62,10 +62,11 @@ model Section {
   createdAt    DateTime @default(now())
 
   department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
-  plans      Plan[]
-  actuals    Actual[]
-  aliases    SectionAlias[]
-  attendance AttendanceRaw[]
+  plans       Plan[]
+  actuals     Actual[]
+  adjustments ActualAdjustment[]
+  aliases     SectionAlias[]
+  attendance  AttendanceRaw[]
 
   /// (部, 課) is the composite natural key used by the re-import upsert (D-153).
   @@unique([departmentId, name])
@@ -90,8 +91,9 @@ model FiscalYear {
   /// [PG] replace with: CREATE UNIQUE INDEX ... ON fiscal_year (is_current) WHERE is_current
   isCurrent Boolean  @default(false)
 
-  plans   Plan[]
-  actuals Actual[]
+  plans       Plan[]
+  actuals     Actual[]
+  adjustments ActualAdjustment[]
 
   @@map("fiscal_year")
 }
@@ -140,7 +142,12 @@ model PlanChangeLog {
   changedAt   DateTime @default(now())
   changedBy   String
 
-  plan Plan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  /// Restrict, not Cascade: this table IS the audit trail D-144 requires, so deleting a
+  /// Plan must not be allowed to take its own evidence with it. Cascade made the delete
+  /// succeed silently and the history simply vanish - no error, nothing to notice. A
+  /// Plan that has recorded changes now cannot be deleted at all, which is the intended
+  /// answer: retire it by other means and keep the trail.
+  plan Plan @relation(fields: [planId], references: [id], onDelete: Restrict)
 
   @@index([planId, changedAt])
   @@map("plan_change_log")
@@ -171,6 +178,19 @@ model Actual {
   /// anomalies directly queryable.
   /// [PG] Decimal @db.Decimal(12, 2)
   totalHours     Float     @default(0)
+  /// D-198: how this row's hours were produced. "fold" = derived from attendance_raw
+  /// by rebuildMonthlyActuals(); "manual" = a historical baseline typed in by hand for
+  /// months that predate the system going live, where no attendance_raw rows exist.
+  ///
+  /// Load-bearing, not descriptive: manual rows carry the whole month in totalHours with
+  /// personnelHours/overtimeHours left at 0 (the split is unavailable retroactively), so
+  /// anything that recomputes a month MUST refuse to touch a month holding manual rows -
+  /// a blind rebuild would find no attendance and zero the baseline out, silently
+  /// breaking D-141's 剩余 = 计划 − 实绩.
+  ///
+  /// SQLite has no enum, so this is TEXT and lib/db/actual-source.ts IS the constraint.
+  /// [PG] becomes a real enum.
+  source         String    @default("fold")
   sourceFile     String?
   fetchedAt      DateTime?
   lastComputedAt DateTime  @updatedAt
@@ -181,6 +201,98 @@ model Actual {
   @@unique([sectionId, fiscalYearId, month])
   @@index([fiscalYearId, month])
   @@map("actual")
+}
+
+/// D-233: hours that belong in 实绩 but have no attendance detail behind them.
+///
+/// Two requirements arrive at the same shape. 8月 is a go-live boundary month - 26-31 came
+/// from the automatic fetch, 1-25 exists only as a per-section monthly total - and from
+/// now on the folded figure will sometimes disagree with a hand-kept tally. Both are
+/// "a section-month owes N more hours than the detail can account for".
+///
+/// A COLUMN ON Actual WAS REJECTED, for a reason that is not stylistic:
+/// rebuildMonthlyActuals() ends with deleteMany({ sectionId: { notIn: aggregates } }), so a
+/// section with no attendance rows that month loses its Actual row entirely. Carried as a
+/// column, 1-25's back-fill would silently vanish for exactly those sections. A separate
+/// table cannot be reached by that delete.
+///
+/// Consequences that follow from this being a separate table, all deliberate:
+///   - Readers must treat the row set as Actual UNION Adjustment, not Actual alone. A
+///     section-month may hold an adjustment and no folded row at all.
+///   - buildOrgRoot() does `slot.actual = row.totalHours` (assignment, not +=), so the
+///     merge MUST collapse to one row per (section, month) before it reaches any consumer.
+///
+/// D-141 (剩余 = 计划 − 实绩) is unchanged; this refines what 实绩 counts. It is
+/// folded hours + the sum of un-revoked adjustments. Nothing else changed meaning.
+model ActualAdjustment {
+  id           String @id @default(cuid())
+  sectionId    String
+  fiscalYearId String
+  /// 1..12, where 1 = April. Guarded by assertFiscalMonth() at every write site.
+  month        Int
+
+  /// Total hours only - no 人员/加班 split. The source data for both use cases is a
+  /// single per-section figure (D-233), and inventing a split would fabricate precision
+  /// that was never measured.
+  ///
+  /// Signed on purpose: a hand tally that comes in BELOW the folded figure is corrected
+  /// by a negative adjustment, which is the same operation as a positive one. Clamping
+  /// to zero would make one of the two directions unrepresentable.
+  /// [PG] Decimal @db.Decimal(12, 2)
+  hours        Float
+
+  /// The section-month's folded `Actual.totalHours` AT THE MOMENT this slip was written.
+  /// Not displayed, not summed - it exists solely so the read side can detect that the
+  /// base moved out from under the slip.
+  ///
+  /// WHAT IT CATCHES. 8月 is a `fold` month, so rebuildMonthlyActuals()'s D-198 guard
+  /// (which only refuses `manual` months) will happily re-fold it. If 8月1-25's
+  /// attendance detail ever arrives - a scheduled fetch of a back-dated file, or a manual
+  /// /actuals/import upload, neither of which filters by date - `totalHours` jumps from
+  /// ~6870 to ~31000 while the un-revoked slips keep adding their hand-tallied hours on
+  /// top. The result is roughly double-counted, raises no error, and writes no log. This
+  /// snapshot is the only way to notice.
+  ///
+  /// 0, NOT null, when no `Actual` row exists for the section-month: "no folded row" means
+  /// the fold contributed zero, and a later real fold moves it off zero and trips the
+  /// check. Recording null there would disable detection for exactly the case that needs
+  /// it most - a slip entered before any detail existed.
+  ///
+  /// Nullable only so a row inserted outside this code path (a hand-written SQL back-fill)
+  /// can say "base unknown" rather than lie about it. Null means NOT CHECKED, never
+  /// "unchanged".
+  /// [PG] Decimal @db.Decimal(12, 2)
+  foldHoursAtEntry Float?
+
+  /// MANDATORY, unlike MasterDataChangeLog.reason. The whole value of this table is that
+  /// a discrepancy stays visible and explicable; a null reason turns a row back into the
+  /// untraceable hand-edit it was built to replace. The UI enforces non-empty (D-214's
+  /// precedent on PlanChangeLog).
+  reason       String
+
+  /// Always "admin" - a placeholder, not an identity. Never present it as evidence of
+  /// who acted.
+  changedBy    String   @default("admin")
+  changedAt    DateTime @default(now())
+
+  /// Soft revoke, mirroring AttendanceRaw.supersededAt (D-229). Correcting an adjustment
+  /// is revoke-then-insert, never an in-place edit of `hours`: an overwrite leaves no
+  /// trace, which is the failure this table exists to prevent. No approval step gates the
+  /// write (the operator's explicit choice) - the trail is the only control, so it must
+  /// survive the correction.
+  revokedAt    DateTime?
+  revokedBy    String?
+
+  section    Section    @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  fiscalYear FiscalYear @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+
+  /// NO unique key on (sectionId, fiscalYearId, month), unlike Actual. One section-month
+  /// legitimately carries several adjustments from unrelated events - 8月's go-live
+  /// back-fill and a discrepancy found in October are two facts, not one fact edited
+  /// twice. Uniqueness here would force the second to overwrite the first.
+  @@index([fiscalYearId, month])
+  @@index([sectionId, fiscalYearId, month])
+  @@map("actual_adjustment")
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +330,12 @@ model WorkCalendar {
   remark    String?
   updatedAt DateTime @updatedAt
 
-  @@index([dayType])
+  /// (dayType, date) not (dayType): every real query filters a type over a date range.
+  /// Measured plan with the single-column index was
+  /// `SEARCH work_calendar USING INDEX work_calendar_dayType_idx (dayType=?)` - the date
+  /// range was then filtered by scanning the matched rows. Harmless at 0 rows today,
+  /// linear in the type's row count once a full year is loaded.
+  @@index([dayType, date])
   @@map("work_calendar")
 }
 
@@ -329,6 +446,28 @@ model AttendanceRaw {
   sourceFile String
   importedAt DateTime @default(now())
 
+  /// D-229 soft supersede. NULL means live; non-NULL means a LATER file for the same
+  /// workDate no longer contained this (工号, 出勤日期), i.e. HR deleted the row.
+  ///
+  /// Row-level upsert (the @@unique below) already gives "duplicates are no-ops,
+  /// later file wins" for inserts and updates, but it CANNOT express a deletion:
+  /// overwriting only touches keys present in the incoming file, so a row HR dropped
+  /// would survive as a ghost and keep feeding the monthly aggregate.
+  ///
+  /// Soft, not hard delete, because D-206 is "不做删除、长期保留" and the only DELETE in
+  /// the codebase targets the recomputable monthly aggregate. Raw detail is NOT
+  /// recomputable - hard-deleting it would erase the fact that HR once reported the
+  /// row, which is exactly what the audit trail exists to preserve.
+  ///
+  /// Deliberately NOT indexed. Every read filters `workDate` range AND
+  /// `supersededAt: null`; the existing @@index([workDate]) already narrows to one
+  /// month, and supersededAt has near-zero selectivity (almost every row is NULL), so
+  /// an index on it would cost write amplification and buy nothing.
+  supersededAt DateTime?
+  /// File that superseded this row, e.g. 日考勤数据260828_1500.csv. Answers "which
+  /// file removed it, and when" - information that hard deletion destroys.
+  supersededBy String?
+
   section Section? @relation(fields: [sectionId], references: [id], onDelete: Restrict)
 
   /// D-122: idempotent upsert key. Re-import overwrites the same day in place.
@@ -339,8 +478,10 @@ model AttendanceRaw {
 }
 
 /// One row per fetch attempt (D-123), success or failure. Failures are recorded
-/// rather than thrown away: the 06:00 fetch retries hourly until 18:00, and the
-/// /actuals status panel has to show that the retries happened.
+/// rather than thrown away: D-228 fixed two scheduled fetches per day (09:05 and
+/// 15:05, both carrying the PREVIOUS day), and the /actuals status panel has to show
+/// that both ran. Two SUCCESS rows for one calendar day is the normal case, not a
+/// retry - the earlier "06:00 then hourly retries until 18:00" scheme is void.
 model ImportLog {
   id           String    @id @default(cuid())
   fileName     String
@@ -354,7 +495,25 @@ model ImportLog {
   status       String
   /// Rows actually written. 0 on FAILED.
   rowCount     Int       @default(0)
+  /// D-229: rows this file superseded, i.e. rows HR deleted since the earlier fetch.
+  /// Separate from rowCount, which only counts rows WRITTEN - without this column a
+  /// data reduction is completely invisible on the audit page (D-226), and "15:00
+  /// removed 3 people's day" is precisely the event an operator must be able to see.
+  /// 0 whenever the sharp-drop guard skipped supersede, so 0 does not prove "nothing
+  /// was removed" - read it together with warningMessage.
+  supersededCount Int    @default(0)
   errorMessage String?
+  /// D-222 completeness warning: the day's rows are valid but look incomplete, most
+  /// likely because HR exported before the clock machines finished syncing. Kept out
+  /// of `errorMessage`, whose contract is "null on a clean SUCCESS" - callers read a
+  /// non-null there as "something went wrong", and a warning is neither.
+  warningMessage String?
+  /// Share of on-roll, not-on-leave, no-leave-hours rows with zero 上班时数, 0..1.
+  /// Null when the export lacks 在职/是否休假, holds no rows, or the import FAILED.
+  ///
+  /// Recorded on every import that landed, not only when the warning fires: the 10%
+  /// threshold is calibrated from a single day, and this series is what will replace it.
+  unexplainedZeroRatio Float?
   /// 'schedule' | 'manual' | 'retry' (D-123).
   triggeredBy  String
 
@@ -372,12 +531,12 @@ model ImportLog {
 /// first, so the state before any edit survives exactly once instead of being
 /// duplicated on every subsequent write.
 ///
-/// changedBy is ALWAYS the literal "admin" and is NOT an identity: v1 has no
-/// login, no roles, no session (D-008). The only access control is the nginx
-/// allowlist, which D-171 deliberately keeps open to the whole private range, so
-/// anyone on the intranet can edit /admin without credentials. This table answers
-/// "when was it changed to this", NOT "who changed it". The same limitation is
-/// stated on /admin itself - operators never read schema comments.
+/// changedBy is ALWAYS the literal "admin" and is NOT an identity. D-180 added a
+/// shared-password gate, so reaching a write now requires knowing one password -
+/// but there is still exactly one account and no per-person identity (D-179 kept
+/// the literal on purpose). This table answers "when was it changed to this", NOT
+/// "who changed it". The same limitation is stated on /admin itself - operators
+/// never read schema comments.
 model MasterDataChangeLog {
   id        String   @id @default(cuid())
   /// 'organization' | 'job_title_rule'. SQLite has no enum; the repo is the only
@@ -392,6 +551,13 @@ model MasterDataChangeLog {
   targetKey String
   /// Complete JSON snapshot of the entity class AFTER the write.
   snapshot  String
+  /// Free-text why, OPTIONAL and usually null (D-184). Deliberately inconsistent
+  /// with PlanChangeLog.reason, which the UI makes mandatory (D-214): plan hours are
+  /// edited often and by several hands, while an org change is rare and its "why"
+  /// is normally obvious from the snapshot. Forcing a reason here would only harvest
+  /// the word "调整". A `baseline` row always carries null - it describes the state
+  /// before anybody edited anything, so there is no reason to give.
+  reason    String?
   changedAt DateTime @default(now())
   /// Always "admin"; a placeholder, not an identity. See the model docstring.
   changedBy String   @default("admin")

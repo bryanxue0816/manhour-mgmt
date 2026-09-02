@@ -24,6 +24,7 @@ import {
   IMPORT_TRIGGERS,
   assertImportStatus,
   assertImportTrigger,
+  completenessFieldsFor,
   normaliseErrorMessage,
 } from "./import-status";
 import type { ImportLogDto, ImportLogInput } from "./types";
@@ -55,6 +56,9 @@ function toImportLogDto(row: {
   status: string;
   rowCount: number;
   errorMessage: string | null;
+  warningMessage: string | null;
+  unexplainedZeroRatio: number | null;
+  supersededCount: number;
   triggeredBy: string;
 }): ImportLogDto {
   return {
@@ -65,6 +69,9 @@ function toImportLogDto(row: {
     status: assertImportStatus(row.status),
     rowCount: row.rowCount,
     errorMessage: row.errorMessage,
+    warningMessage: row.warningMessage,
+    unexplainedZeroRatio: row.unexplainedZeroRatio,
+    supersededCount: row.supersededCount,
     triggeredBy: assertImportTrigger(row.triggeredBy),
   };
 }
@@ -78,11 +85,21 @@ function toImportLogDto(row: {
  * `rowCount` is forced to 0 on FAILED rather than trusted from the caller. A failed
  * import stores nothing (importAttendanceRows wraps its writes in a transaction), so a
  * non-zero count there would be a lie that the /actuals panel would display as progress.
+ *
+ * `supersededCount` (D-229) is forced to 0 on FAILED for the same reason and by the same
+ * mechanism: the supersede pass runs inside that same transaction, so a failure rolled it
+ * back, and every row HR removed is still live.
+ *
+ * Both D-222 fields are dropped on FAILED for the same reason - see
+ * `completenessFieldsFor()`, which holds that rule so it can be asserted without a database.
+ * Enforced here rather than left to callers, because this repository is the only writer.
  */
 export async function appendImportLog(input: ImportLogInput): Promise<ImportLogDto> {
   const status = assertImportStatus(input.status);
   const triggeredBy = assertImportTrigger(input.triggeredBy);
   const rowCount = status === "FAILED" ? 0 : (input.rowCount ?? 0);
+  const supersededCount = status === "FAILED" ? 0 : (input.supersededCount ?? 0);
+  const completeness = completenessFieldsFor(status, input);
   const row = await prisma.importLog.create({
     data: {
       fileName: input.fileName,
@@ -90,6 +107,9 @@ export async function appendImportLog(input: ImportLogInput): Promise<ImportLogD
       status,
       rowCount,
       errorMessage: normaliseErrorMessage(input.errorMessage),
+      warningMessage: completeness.warningMessage,
+      unexplainedZeroRatio: completeness.unexplainedZeroRatio,
+      supersededCount,
       triggeredBy,
     },
   });
@@ -105,6 +125,41 @@ export async function findRecentImportLogs(
     take: Math.max(1, Math.trunc(limit)),
   });
   return rows.map(toImportLogDto);
+}
+
+export interface ImportLogPageQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * One page of attempts, newest first, for the audit view's import tab (D-226).
+ *
+ * Ordered by `[importedAt desc, id desc]` where findRecentImportLogs gets away with
+ * `importedAt` alone. A directory scan appends several rows inside the same second, and
+ * SQLite may return such ties in any order between two queries - under LIMIT/OFFSET that
+ * means page 1 and page 2 can both show one attempt and neither show another. The id is
+ * not a meaningful "later than", it is just a total order, which is all paging needs.
+ */
+export async function findImportLogPage(
+  query: ImportLogPageQuery = {},
+): Promise<ImportLogDto[]> {
+  const rows = await prisma.importLog.findMany({
+    orderBy: [{ importedAt: "desc" }, { id: "desc" }],
+    take: query.limit ?? DEFAULT_HISTORY_LIMIT,
+    skip: query.offset ?? 0,
+  });
+  return rows.map(toImportLogDto);
+}
+
+/**
+ * Every attempt ever logged, failures included. Drives the audit tab counter and pager.
+ *
+ * Unfiltered on purpose: a count that quietly excluded FAILED rows would make the tab
+ * label read as if nothing had gone wrong.
+ */
+export async function countImportLogs(): Promise<number> {
+  return prisma.importLog.count();
 }
 
 /**

@@ -43,20 +43,24 @@ import { toast } from "sonner";
 
 import { findOrphanSections, groupByDepartment } from "./org-grouping";
 import {
+  draftFromDepartment,
+  draftFromSection,
+  emptyNewSection,
+  isDepartmentDirty,
+  isSectionDirty,
+  omitKey,
+  type NewSectionDraft,
+  type OrgField,
+  type RowDraft,
+} from "./org-drafts";
+import { ReasonField } from "./ReasonField";
+import { SectionRenameDialog, type PendingRename } from "./SectionRenameDialog";
+import {
   createSection,
   renameSection,
   saveDepartment,
   saveSection,
-  type DepartmentField,
-  type SectionField,
 } from "../actions";
-import {
-  AlertDialog,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { DepartmentDto, SectionDto } from "@/lib/db/types";
@@ -64,115 +68,6 @@ import type { DepartmentDto, SectionDto } from "@/lib/db/types";
 const TEXT_MAX_LENGTH = 50;
 const CODE_MAX_LENGTH = 20;
 const EMAIL_MAX_LENGTH = 100;
-
-/** Every editable field of either level, so one draft shape covers both tables. */
-type OrgField = DepartmentField | SectionField;
-
-interface RowDraft {
-  code: string;
-  sortOrder: string;
-  managerName: string;
-  managerEmail: string;
-  status: "idle" | "saving" | "error";
-  fieldErrors: Partial<Record<OrgField, string>>;
-}
-
-interface NewSectionDraft extends RowDraft {
-  name: string;
-}
-
-/**
- * The rename awaiting confirmation, or in flight.
- *
- * Kept outside `RowDraft` because a rename is not one of that shape's fields: it is a
- * separate transaction, only ever applies to a 課, and has to survive the dialog being
- * open while the row underneath it stays otherwise editable.
- */
-interface PendingRename {
-  section: SectionDto;
-  /** Already trimmed - what the dialog shows and what gets submitted. */
-  nextName: string;
-  status: "confirming" | "saving";
-}
-
-/**
- * The row's stored values as strings.
- *
- * `sortOrder` is stringified rather than kept numeric because the Server Action takes
- * raw strings: sending a number would mean parsing in the browser, where "abc" becomes
- * NaN and blank becomes 0 before the layer that knows what those mean sees them.
- */
-function draftFromDepartment(department: DepartmentDto): RowDraft {
-  return {
-    code: department.code ?? "",
-    sortOrder: String(department.sortOrder),
-    managerName: department.managerName ?? "",
-    managerEmail: department.managerEmail ?? "",
-    status: "idle",
-    fieldErrors: {},
-  };
-}
-
-function draftFromSection(section: SectionDto): RowDraft {
-  return {
-    // Sections have no `code` column; the field is present so one draft type serves
-    // both levels, and is never rendered or submitted for a section.
-    code: "",
-    sortOrder: String(section.sortOrder),
-    managerName: section.managerName ?? "",
-    managerEmail: section.managerEmail ?? "",
-    status: "idle",
-    fieldErrors: {},
-  };
-}
-
-function emptyNewSection(): NewSectionDraft {
-  return {
-    name: "",
-    code: "",
-    sortOrder: "",
-    managerName: "",
-    managerEmail: "",
-    status: "idle",
-    fieldErrors: {},
-  };
-}
-
-function isDepartmentDirty(department: DepartmentDto, draft: RowDraft | undefined): boolean {
-  if (draft === undefined) {
-    return false;
-  }
-  const stored = draftFromDepartment(department);
-  return (
-    draft.code !== stored.code ||
-    draft.sortOrder !== stored.sortOrder ||
-    draft.managerName !== stored.managerName ||
-    draft.managerEmail !== stored.managerEmail
-  );
-}
-
-function isSectionDirty(section: SectionDto, draft: RowDraft | undefined): boolean {
-  if (draft === undefined) {
-    return false;
-  }
-  const stored = draftFromSection(section);
-  return (
-    draft.sortOrder !== stored.sortOrder ||
-    draft.managerName !== stored.managerName ||
-    draft.managerEmail !== stored.managerEmail
-  );
-}
-
-/** Copy of `source` without `key`, leaving the input untouched (React state is frozen). */
-function omitKey<T>(source: Record<string, T>, key: string): Record<string, T> {
-  const next: Record<string, T> = {};
-  for (const [entryKey, value] of Object.entries(source)) {
-    if (entryKey !== key) {
-      next[entryKey] = value;
-    }
-  }
-  return next;
-}
 
 const HEAD_CLASS =
   "py-2 pr-4 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase";
@@ -258,6 +153,20 @@ export function OrgEditor({
     [patch],
   );
 
+  /**
+   * Reason edit on a stored row.
+   *
+   * Separate from editField() because `reason` is not an OrgField: it has no per-field
+   * error to clear, and typing it must not touch `fieldErrors` - the operator may well
+   * be explaining the very change whose refusal is still marked on another cell.
+   */
+  const editReason = useCallback(
+    (id: string, seed: () => RowDraft, next: string): void => {
+      patch(id, seed, (current) => ({ ...current, reason: next }));
+    },
+    [patch],
+  );
+
   const handleSaveDepartment = useCallback(
     async (department: DepartmentDto, submitted: RowDraft): Promise<void> => {
       if (submitted.status === "saving") {
@@ -272,6 +181,7 @@ export function OrgEditor({
         sortOrderRaw: submitted.sortOrder,
         managerNameRaw: submitted.managerName,
         managerEmailRaw: submitted.managerEmail,
+        reasonRaw: submitted.reason,
       });
 
       if (result.ok) {
@@ -304,6 +214,7 @@ export function OrgEditor({
         sortOrderRaw: submitted.sortOrder,
         managerNameRaw: submitted.managerName,
         managerEmailRaw: submitted.managerEmail,
+        reasonRaw: submitted.reason,
       });
 
       if (result.ok) {
@@ -329,35 +240,42 @@ export function OrgEditor({
     );
   }, []);
 
-  const confirmRename = useCallback(async (pending: PendingRename): Promise<void> => {
-    if (pending.status === "saving") {
-      return;
-    }
-    setPendingRename({ ...pending, status: "saving" });
-    const { section, nextName } = pending;
+  const confirmRename = useCallback(
+    async (pending: PendingRename, reason: string): Promise<void> => {
+      if (pending.status === "saving") {
+        return;
+      }
+      setPendingRename({ ...pending, status: "saving" });
+      const { section, nextName } = pending;
 
-    const result = await renameSection({ id: section.id, nameRaw: nextName });
-
-    setPendingRename(null);
-    if (result.ok) {
-      // Draft dropped rather than kept: revalidatePath("/admin") re-renders with the
-      // stored name, and an absent draft reads straight from props.
-      setNameDrafts((previous) => omitKey(previous, section.id));
-      toast.success(`${section.name} 已改名为 ${nextName}`, {
-        description: "历史考勤中的原课名已登记为别名,继续匹配到本课。",
+      const result = await renameSection({
+        id: section.id,
+        nameRaw: nextName,
+        reasonRaw: reason,
       });
-      return;
-    }
-    // The typed value is left in place on purpose - the operator has to be able to see
-    // and fix what was refused.
-    setNameErrors((previous) => ({
-      ...previous,
-      [section.id]: result.fieldErrors.name ?? result.message,
-    }));
-    toast.error(`${section.name}: ${result.fieldErrors.name ?? result.message}`);
-    // setPendingRename is listed because this callback awaits: the React Compiler
-    // cannot prove the setter is the stable one across the await, and rejects [].
-  }, [setPendingRename]);
+
+      setPendingRename(null);
+      if (result.ok) {
+        // Draft dropped rather than kept: revalidatePath("/admin") re-renders with the
+        // stored name, and an absent draft reads straight from props.
+        setNameDrafts((previous) => omitKey(previous, section.id));
+        toast.success(`${section.name} 已改名为 ${nextName}`, {
+          description: "历史考勤中的原课名已登记为别名,继续匹配到本课。",
+        });
+        return;
+      }
+      // The typed value is left in place on purpose - the operator has to be able to see
+      // and fix what was refused.
+      setNameErrors((previous) => ({
+        ...previous,
+        [section.id]: result.fieldErrors.name ?? result.message,
+      }));
+      toast.error(`${section.name}: ${result.fieldErrors.name ?? result.message}`);
+      // setPendingRename is listed because this callback awaits: the React Compiler
+      // cannot prove the setter is the stable one across the await, and rejects [].
+    },
+    [setPendingRename],
+  );
 
   const handleCreateSection = useCallback(
     async (departmentId: string, departmentName: string, submitted: NewSectionDraft) => {
@@ -372,6 +290,7 @@ export function OrgEditor({
         sortOrderRaw: submitted.sortOrder,
         managerNameRaw: submitted.managerName,
         managerEmailRaw: submitted.managerEmail,
+        reasonRaw: submitted.reason,
       });
 
       if (result.ok) {
@@ -401,6 +320,11 @@ export function OrgEditor({
     }));
   }, []);
 
+  /** Reason edit on the add-section row - see editReason for why it is separate. */
+  const editNewSectionReason = useCallback((next: string): void => {
+    setNewSection((previous) => ({ ...previous, reason: next }));
+  }, []);
+
   const newSectionSaving = newSection.status === "saving";
 
   return (
@@ -408,6 +332,7 @@ export function OrgEditor({
       <table className="w-full border-collapse text-sm">
         <caption className="sr-only">
           组织结构编辑表。可修改排序、责任者、邮箱与部门编码,并在部门下新增课。
+          每行可填写选填的变更原因,与本次修改一同记入履历。
           课名称可通过「改名」按钮修改,原名会登记为别名以保留历史考勤匹配;部门名称不可修改。每行独立保存。
         </caption>
         <thead>
@@ -426,6 +351,9 @@ export function OrgEditor({
             </th>
             <th scope="col" className={`${HEAD_CLASS} w-52`}>
               邮箱
+            </th>
+            <th scope="col" className={`${HEAD_CLASS} w-44`}>
+              变更原因
             </th>
             <th scope="col" className={`${HEAD_CLASS} w-44 text-right`}>
               操作
@@ -500,6 +428,14 @@ export function OrgEditor({
                       disabled={saving}
                       error={effective.fieldErrors.managerEmail}
                       onChange={(field, next) => editField(department.id, seed, field, next)}
+                    />
+                  </td>
+                  <td className="py-2 pr-4">
+                    <ReasonField
+                      value={effective.reason}
+                      label={`${department.name} 变更原因`}
+                      disabled={saving}
+                      onChange={(next) => editReason(department.id, seed, next)}
                     />
                   </td>
                   <td className="py-2 pr-4 text-right whitespace-nowrap">
@@ -594,6 +530,14 @@ export function OrgEditor({
                           onChange={(field, next) => editField(section.id, sectionSeed, field, next)}
                         />
                       </td>
+                      <td className="py-2 pr-4">
+                        <ReasonField
+                          value={sectionEffective.reason}
+                          label={`${section.name} 变更原因`}
+                          disabled={sectionSaving}
+                          onChange={(next) => editReason(section.id, sectionSeed, next)}
+                        />
+                      </td>
                       <td className="py-2 pr-4 text-right whitespace-nowrap">
                         <Button
                           size="xs"
@@ -675,6 +619,14 @@ export function OrgEditor({
                         onChange={(field, next) => editNewSection(field, next)}
                       />
                     </td>
+                    <td className="py-2.5 pr-4">
+                      <ReasonField
+                        value={newSection.reason}
+                        label="新增课的变更原因"
+                        disabled={newSectionSaving}
+                        onChange={editNewSectionReason}
+                      />
+                    </td>
                     <td className="py-2.5 pr-4 text-right whitespace-nowrap">
                       <Button
                         size="xs"
@@ -701,7 +653,7 @@ export function OrgEditor({
                   </tr>
                 ) : (
                   <tr className="border-t border-border/40">
-                    <td colSpan={6} className="py-1.5 pl-8">
+                    <td colSpan={7} className="py-1.5 pl-8">
                       <Button
                         size="xs"
                         variant="ghost"
@@ -748,61 +700,20 @@ export function OrgEditor({
 
       <p className="px-4 pt-3 text-xs text-muted-foreground">
         课名称改名后,原课名会登记为别名,历史考勤数据仍会匹配到本课。
+        「变更原因」为选填,只随该行的 保存 一同记入履历;改名的原因在确认弹框中填写。
         部门名称是所有下属课的匹配键的一部分,不在本页范围内。
         删除同样不在本页范围内(存在计划/实绩引用)。
       </p>
 
       {pendingRename === null ? null : (
-        <AlertDialog
-          open
-          onOpenChange={(open) => {
-            // Escape is the only route to false - neither button is a Close part - and
-            // it means the same as 取消: close, write nothing, keep what was typed.
-            if (!open && pendingRename.status !== "saving") {
-              setPendingRename(null);
-            }
-          }}
-        >
-          <AlertDialogContent>
-            <AlertDialogTitle>确认修改课名称</AlertDialogTitle>
-            <AlertDialogDescription>
-              该课的历史考勤数据按「部名 + 课名」匹配,改名后原名会登记为别名。
-            </AlertDialogDescription>
-
-            <dl className="mt-3 space-y-1 rounded-md bg-muted/40 px-3 py-2 text-sm">
-              <div className="flex items-baseline justify-between gap-3">
-                <dt className="text-muted-foreground">原课名</dt>
-                <dd className="font-medium">{pendingRename.section.name}</dd>
-              </div>
-              <div className="flex items-baseline justify-between gap-3">
-                <dt className="text-muted-foreground">新课名</dt>
-                <dd className="font-medium text-plan">{pendingRename.nextName}</dd>
-              </div>
-            </dl>
-
-            <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-muted-foreground">
-              <li>历史考勤会通过别名继续匹配到本课,计划与实绩不会被拆分。</li>
-              <li>本次改名会记入主数据修改履历。</li>
-              <li>若新课名已被本部门其他课或其别名占用,改名会被拒绝,数据不变。</li>
-            </ul>
-
-            <AlertDialogFooter>
-              <Button
-                variant="outline"
-                disabled={pendingRename.status === "saving"}
-                onClick={() => setPendingRename(null)}
-              >
-                取消
-              </Button>
-              <Button
-                disabled={pendingRename.status === "saving"}
-                onClick={() => void confirmRename(pendingRename)}
-              >
-                {pendingRename.status === "saving" ? "改名中" : "确认改名"}
-              </Button>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+        // key: cheap insurance against reusing this dialog's internal reason state if a
+        // second row's 改名 were ever opened without the first one closing.
+        <SectionRenameDialog
+          key={pendingRename.section.id}
+          pending={pendingRename}
+          onCancel={() => setPendingRename(null)}
+          onConfirm={(reason) => void confirmRename(pendingRename, reason)}
+        />
       )}
     </div>
   );
