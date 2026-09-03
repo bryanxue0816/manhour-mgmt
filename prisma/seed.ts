@@ -76,27 +76,26 @@ function assertSeedCount(label: string, actual: number, expected: number): void 
  *
  * D-161 added 工场长 and 高级课长, taking this from 5 rows to 7. D-237 corrected their
  * flags: they are overtime-only exclusions like 课长, NOT both-list exclusions. D-238
- * added 项目经理 (overtime-only) and cleared BOTH of 项目课长's flags, taking the table to
- * 8 rows. Only three titles ever drop personnel hours - 部长, 项目部长, 副总经理. Getting
- * this wrong over-deducts personnel hours with no error anywhere, so the sets are stated
- * separately here rather than left to be read off the rows:
+ * added 项目经理 (overtime-only, 8 rows) and REVISED the personnel-exclusion set itself:
+ * 项目部长 left it and 项目课长 entered it. The two sets are NOT the same size, and
+ * getting this wrong over- or under-deducts personnel hours with no error anywhere, so
+ * they are stated separately here rather than left to be read off the rows:
  *
- *   personnel excluded (3): 部长, 项目部长, 副总经理
- *   overtime  excluded (7): those 3, plus 工场长, 高级课长, 课长, 项目经理
- *   excluded from neither (1): 项目课长
+ *   personnel excluded (3): 部长, 项目课长, 副总经理
+ *   overtime  excluded (8): every row below
  *
- * 项目课长 is deliberately kept as a both-false row even though it is behaviourally
- * IDENTICAL to having no row at all: ruleVerdict() returns
- * {excludedPersonnel: false, excludedOvertime: false} both on a map miss and on a
- * both-false hit. The row is documentation - the title exists in the org chart but no
- * rule acts on it - so nobody re-derives an exclusion by guessing from its absence. The
- * flip side is that its disappearance produces no runtime symptom whatsoever;
- * assertSeedCount("job title rules", ..., 8) below is the ONLY thing that would catch it.
+ * The personnel set reads like a mis-click and is NOT one. 项目部长 sits ABOVE 项目课长
+ * in the org chart, yet 项目部长's personnel hours COUNT toward its section while
+ * 项目课长's are excluded - an apparent hierarchy inversion. It was flagged as a probable
+ * wrong-row edit in the admin UI (the two titles are adjacent when sorted by name) and
+ * the user confirmed the production values are deliberate. Do NOT "fix" it back to
+ * D-107's original {部长, 项目部长, 副总经理} on the assumption that it is a typo.
  *
- * 系长 is intentionally absent for the opposite reason: it is a 一线 title, so both its
- * personnel and overtime hours count, and that is exactly what "no rule" already yields
- * (216 rows in the real data fall through this way). Adding a both-false row for it would
- * be equally inert; the 8-row count is the assertion, so do not pad it.
+ * 系长 is intentionally absent: it is a 一线 title, so both its personnel and overtime
+ * hours count, and that is exactly what "no rule" already yields - ruleVerdict() returns
+ * {excludedPersonnel: false, excludedOvertime: false} for a map miss. 216 rows in the
+ * real data fall through this way. Adding a both-false row for it would be inert and
+ * would break the row-count assertion below, so do not pad the table with one.
  *
  * Note that widening the exclusion set does NOT necessarily lower a total: both 课长 and
  * 项目经理 aggregate to NEGATIVE overtime in the real data (项目经理 measured at -7 H over
@@ -104,6 +103,7 @@ function assertSeedCount(label: string, actual: number, expected: number): void 
  * negative and deliberately unclamped - see the D-105 note in src/lib/db/hours.ts.
  */
 const JOB_TITLE_RULES: readonly JobTitleRuleDto[] = [
+  // --- personnel AND overtime excluded (3) -----------------------------------
   {
     jobTitle: "部长",
     excludePersonnelHours: true,
@@ -111,16 +111,27 @@ const JOB_TITLE_RULES: readonly JobTitleRuleDto[] = [
     remark: "Department head - budgeted outside the section aggregate.",
   },
   {
-    jobTitle: "项目部长",
+    jobTitle: "项目课长",
     excludePersonnelHours: true,
     excludeOvertimeHours: true,
-    remark: "Project department head - same treatment as 部长.",
+    remark:
+      "Project section head (D-238) - both lists excluded. Entered the personnel-exclusion " +
+      "set even though the higher-ranking 项目部长 did not; confirmed deliberate.",
   },
   {
     jobTitle: "副总经理",
     excludePersonnelHours: true,
     excludeOvertimeHours: true,
     remark: "Deputy general manager - excluded from all section aggregates.",
+  },
+  // --- overtime only (5): personnel hours COUNT toward the section -----------
+  {
+    jobTitle: "项目部长",
+    excludePersonnelHours: false,
+    excludeOvertimeHours: true,
+    remark:
+      "Project department head (D-238) - personnel hours COUNTED, overtime excluded. " +
+      "Left the D-107 personnel-exclusion set; confirmed deliberate, not a wrong-row edit.",
   },
   {
     jobTitle: "工场长",
@@ -145,14 +156,6 @@ const JOB_TITLE_RULES: readonly JobTitleRuleDto[] = [
     excludePersonnelHours: false,
     excludeOvertimeHours: true,
     remark: "Project manager (D-238) - personnel hours counted, overtime excluded.",
-  },
-  {
-    jobTitle: "项目课长",
-    excludePersonnelHours: false,
-    excludeOvertimeHours: false,
-    remark:
-      "Project section head (D-238) - exists in org chart but no rule acts on it. " +
-      "Both flags false: behaviourally identical to no row, retained for documentation.",
   },
 ];
 

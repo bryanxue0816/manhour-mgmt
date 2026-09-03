@@ -82,9 +82,9 @@ export interface AttendanceFacts extends AttendanceHourInputs {
 
 /** Which of the two hour figures this row's job title removes from the aggregate. */
 export interface ExclusionVerdict {
-  /** D-107: 部长 / 项目部长 / 副总经理 and anything else an administrator adds. */
+  /** D-107, as revised by D-238: 部长 / 项目课长 / 副总经理, plus anything an admin adds. */
   excludedPersonnel: boolean;
-  /** D-108: the D-107 set plus 课长 / 项目课长. */
+  /** D-108: currently every seeded title, i.e. the D-107 set plus 项目部长 / 工场长 / 高级课长 / 课长 / 项目经理. */
   excludedOvertime: boolean;
 }
 
