@@ -40,7 +40,7 @@ import { IMPORT_STATUS_LABELS, IMPORT_TRIGGER_LABELS } from "@/lib/db/import-lab
 import { findLatestSuccessfulImportLog, findRecentImportLogs } from "@/lib/db/import-log.repo";
 import { loadOrgSnapshot } from "@/lib/db/org.repo";
 import type { FiscalYearDto, ImportLogDto } from "@/lib/db/types";
-import { formatHoursValue } from "@/lib/format";
+import { formatHoursValue, formatSignedHours } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
@@ -153,11 +153,6 @@ function adjustmentTitleLines(cell: ActualsCell): readonly string[] {
     lines.push("⚠ 折算工时在调整单录入后发生变化,请核对是否重复计入");
   }
   return lines;
-}
-
-/** Signed hours for adjustment figures - `+300`, `-300`, never a bare `300`. */
-function formatSignedHours(hours: number): string {
-  return hours > 0 ? `+${formatHoursValue(hours)}` : formatHoursValue(hours);
 }
 
 /**
@@ -712,13 +707,22 @@ export default async function ActualsPage({
             </div>
             {/* In the header rather than as a fifth MainNav item: the nav lists the four
                 screens the work flows through, and an upload action is a task on this
-                screen, not a peer of 看板/实绩/计划录入/管理. */}
-            <a
-              href="/actuals/import"
-              className="inline-flex shrink-0 items-center rounded-md bg-actual px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-actual/90"
-            >
-              导入考勤数据 →
-            </a>
+                screen, not a peer of 看板/实绩/计划录入/管理. The same reasoning puts 调整单
+                here - it is a correction to the figures on THIS table, reached from them. */}
+            <div className="flex shrink-0 items-center gap-2">
+              <a
+                href="/actuals/adjust"
+                className="inline-flex items-center rounded-md border border-border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-muted"
+              >
+                实绩调整单 →
+              </a>
+              <a
+                href="/actuals/import"
+                className="inline-flex items-center rounded-md bg-actual px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-actual/90"
+              >
+                导入考勤数据 →
+              </a>
+            </div>
           </div>
           {years.length > 0 ? (
             <YearTabs years={years} activeYear={fiscalYear?.year ?? 0} />

@@ -280,6 +280,29 @@ export function fiscalMonthFromCalendarLabel(label: string, fiscalYear: number):
 }
 
 /**
+ * CALENDAR month label such as `2026年4月` for a fiscal year and month - the inverse of
+ * fiscalMonthFromCalendarLabel().
+ *
+ * fiscalMonthLabel() renders `26/04`, which is what every existing screen shows and what
+ * the operators read fluently. This variant exists for one screen: the monthly adjustment
+ * sheet (D-233), which is read side by side with a hand tally headed 「2026年8月」. Offering
+ * only the fiscal spelling there makes the reader translate `26/08` back to a calendar
+ * month by eye, and the three-month April=1 offset is exactly what gets dropped when a
+ * human does that at the end of a shift.
+ *
+ * Derived from fiscalMonthRange() rather than repeating the offset arithmetic, so this
+ * module keeps having exactly one place where "fiscal month 10 is January of NEXT year"
+ * is written down. Deliberately NOT zero-padded: the paper tally says 「2026年8月」, and a
+ * label reading 「2026年08月」 next to it looks like a different system's output.
+ *
+ * @throws if `month` is not an integer in 1..12.
+ */
+export function calendarMonthLabel(year: number, month: number): string {
+  const { from } = fiscalMonthRange(year, month);
+  return `${String(from.getUTCFullYear())}年${String(from.getUTCMonth() + 1)}月`;
+}
+
+/**
  * Fiscal month (1 = April) for a calendar day.
  *
  * April..December -> 1..9, January..March -> 10..12.

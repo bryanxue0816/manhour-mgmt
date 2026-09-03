@@ -17,6 +17,9 @@
  * | `formatHoursRounded` | `36,193`   | plan import preview (whole hours only) |
  * | `formatHoursBare`    | `4632`     | KPI cards                              |
  *
+ * `formatSignedHours` sits apart from those four: it renders a CHANGE (`-45`), not a
+ * quantity, so it always carries its sign.
+ *
  * `formatHoursBare` deliberately drops the separator: the KPI card renders its
  * figure at display size in a fixed-width slot, where a comma costs a character
  * of room and buys little at four digits.
@@ -69,6 +72,24 @@ export function formatHoursRounded(value: number): string {
  */
 export function formatHoursBare(value: number): string {
   return String(Math.round(value));
+}
+
+/**
+ * Signed hours for adjustment figures - `+300`, `-300`, never a bare `300`.
+ *
+ * An adjustment of "300" is ambiguous on screen: added or removed? Every figure that
+ * represents a CHANGE rather than a QUANTITY carries its sign explicitly.
+ *
+ * Exact zero renders as `0` rather than `+0`, because zero is a real state here (two
+ * live slips can net out) and `+0` would read as an increase. The `value === 0` guard
+ * also catches negative zero, which `-0 === 0` makes true: without it, Intl gives
+ * `"-0"` (ES2020 onward) and the screen shows 「-0.0」 - a tiny reduction that never
+ * happened. Negative zero is easy to reach from here, since any subtraction of equal
+ * magnitudes with a negative left operand produces it.
+ */
+export function formatSignedHours(value: number): string {
+  if (value === 0) return formatHoursValue(0);
+  return value > 0 ? `+${formatHoursValue(value)}` : formatHoursValue(value);
 }
 
 /**

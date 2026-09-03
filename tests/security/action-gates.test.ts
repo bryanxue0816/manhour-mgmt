@@ -8,7 +8,7 @@
 // is not bound to the route it was declared in.
 //
 // So there is exactly one place a check can work: inside the action body. This file
-// asserts all ten of them are gated, and asserts it the same way the original attack
+// asserts all twelve of them are gated, and asserts it the same way the original attack
 // measured the hole - by the message that comes back.
 //
 // WHY THE MESSAGE IS THE ASSERTION HERE, unlike everywhere else in this suite:
@@ -29,7 +29,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
-  // Every function these four action modules can use to touch the database.
+  // Every function these five action modules can use to touch the database.
   createJobTitleRule: vi.fn(),
   upsertJobTitleRule: vi.fn(),
   renameSectionWithAlias: vi.fn(),
@@ -41,9 +41,13 @@ const mocks = vi.hoisted(() => ({
   countPlansByFiscalYear: vi.fn(),
   upsertPlansBulkWithAudit: vi.fn(),
   findFiscalYearById: vi.fn(),
+  findFiscalYearByYear: vi.fn(),
   hasSuccessfulImport: vi.fn(),
   ingestAttendanceSource: vi.fn(),
   inspectAttendanceSource: vi.fn(),
+  findEffectiveActualsByFiscalYear: vi.fn(),
+  createActualAdjustmentsBulk: vi.fn(),
+  revokeActualAdjustment: vi.fn(),
   cookieGet: vi.fn<(name: string) => { name: string; value: string } | undefined>(),
 }));
 
@@ -82,6 +86,18 @@ vi.mock("@/lib/db/plan.repo", async (importOriginal) => ({
 vi.mock("@/lib/db/fiscal-year.repo", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/db/fiscal-year.repo")>()),
   findFiscalYearById: mocks.findFiscalYearById,
+  findFiscalYearByYear: mocks.findFiscalYearByYear,
+}));
+
+vi.mock("@/lib/db/actual-effective.repo", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/db/actual-effective.repo")>()),
+  findEffectiveActualsByFiscalYear: mocks.findEffectiveActualsByFiscalYear,
+}));
+
+vi.mock("@/lib/db/actual-adjustment.repo", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/db/actual-adjustment.repo")>()),
+  createActualAdjustmentsBulk: mocks.createActualAdjustmentsBulk,
+  revokeActualAdjustment: mocks.revokeActualAdjustment,
 }));
 
 vi.mock("@/lib/db/import-log.repo", async (importOriginal) => ({
@@ -102,10 +118,25 @@ import {
   saveJobTitleRule,
   saveSection,
 } from "@/app/admin/actions";
+import { revokeAdjustment, submitActualAdjustments } from "@/app/actuals/adjust/actions";
 import { commitAttendanceImport, previewAttendanceImport } from "@/app/actuals/import/actions";
 import { savePlanCell } from "@/app/plans/actions";
 import { commitPlanImport, previewPlanImport } from "@/app/plans/import/actions";
+import { resolveAdjustTarget } from "@/lib/attendance/adjust-window";
 import { DENIED_MESSAGE } from "@/lib/auth";
+
+/**
+ * The month submitActualAdjustments would accept if it ran, derived the same way the action
+ * derives it.
+ *
+ * Hard-coding a month would make this payload silently fall out of the 只在次月 window as
+ * the calendar moved, and a rejected-for-the-wrong-reason payload cannot detect a missing
+ * gate - the action would refuse it either way.
+ */
+const ADJUST_TARGET = resolveAdjustTarget(new Date());
+
+/** The single 課 the adjustment payload below is written against. */
+const ADJUST_SECTION_ID = "sec-1";
 
 /**
  * A payload that would OTHERWISE SUCCEED, or at least get far enough to write.
@@ -189,6 +220,26 @@ const CALLS: ReadonlyArray<{ name: string; run: () => Promise<{ ok: boolean; mes
     name: "commitAttendanceImport",
     run: () => commitAttendanceImport(attendanceFormData()),
   },
+  {
+    name: "submitActualAdjustments",
+    run: () =>
+      submitActualAdjustments({
+        fiscalYear: ADJUST_TARGET.fiscalYear,
+        month: ADJUST_TARGET.month,
+        reason: "人工统计差异修正",
+        // The stubbed org chart has this 課 with a base of 0, so the delta is +920 and,
+        // per the D-207 carve-out, a base of 0 is not treated as high-risk. An ungated
+        // call therefore reaches createActualAdjustmentsBulk rather than stopping at a
+        // confirmation prompt.
+        entries: { [ADJUST_SECTION_ID]: "920" },
+        bases: { [ADJUST_SECTION_ID]: 0 },
+        riskAcknowledged: false,
+      }),
+  },
+  {
+    name: "revokeAdjustment",
+    run: () => revokeAdjustment({ id: "adj-1" }),
+  },
 ];
 
 /** A plan-import payload carrying a fiscal year and a file, as the form posts it. */
@@ -210,6 +261,52 @@ function attendanceFormData(): FormData {
   return formData;
 }
 
+/**
+ * The minimum stored state that lets an ungated submitActualAdjustments reach its write.
+ *
+ * Without this the action would die reading the org chart and return its own read-failure
+ * message - which is not DENIED_MESSAGE, so the assertion would still pass, but it would
+ * pass because the payload crashed rather than because the gate held. That is the exact
+ * false-green this file's header warns about.
+ */
+function stubAdjustmentReads(): void {
+  mocks.loadOrgSnapshot.mockResolvedValue({
+    departments: [
+      {
+        id: "dep-1",
+        name: "品质保证部",
+        code: "QA",
+        sortOrder: 1,
+        managerName: null,
+        managerEmail: null,
+      },
+    ],
+    sections: [
+      {
+        id: ADJUST_SECTION_ID,
+        departmentId: "dep-1",
+        name: "检査课",
+        sortOrder: 1,
+        managerName: null,
+        managerEmail: null,
+      },
+    ],
+  });
+  mocks.findFiscalYearByYear.mockResolvedValue({
+    id: "fy-adjust",
+    name: `FY${String(ADJUST_TARGET.fiscalYear)}`,
+    year: ADJUST_TARGET.fiscalYear,
+    startDate: new Date(Date.UTC(ADJUST_TARGET.fiscalYear, 3, 1)),
+    endDate: new Date(Date.UTC(ADJUST_TARGET.fiscalYear + 1, 2, 31)),
+    isCurrent: true,
+  });
+  // No folded rows: every cell reads 0, which is a legal state (D-207) and keeps the
+  // fixture from encoding a particular month's attendance data.
+  mocks.findEffectiveActualsByFiscalYear.mockResolvedValue({ rows: [], adjustedMonths: [] });
+  mocks.createActualAdjustmentsBulk.mockResolvedValue(1);
+  mocks.revokeActualAdjustment.mockResolvedValue(true);
+}
+
 /** Every mocked repository write, for the "nothing was touched" assertion. */
 const WRITES = [
   mocks.createJobTitleRule,
@@ -221,6 +318,8 @@ const WRITES = [
   mocks.upsertPlanWithAudit,
   mocks.upsertPlansBulkWithAudit,
   mocks.ingestAttendanceSource,
+  mocks.createActualAdjustmentsBulk,
+  mocks.revokeActualAdjustment,
 ] as const;
 
 beforeEach(() => {
@@ -239,12 +338,17 @@ beforeEach(() => {
     write.mockReset();
   }
 
+  mocks.loadOrgSnapshot.mockReset();
+  mocks.findFiscalYearByYear.mockReset();
+  mocks.findEffectiveActualsByFiscalYear.mockReset();
+  stubAdjustmentReads();
+
   // Silences the expected "[auth] denied: no-cookie" line, and would fail loudly if the
   // gate stopped logging.
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 
-describe("Server Action gates - an anonymous caller is refused by all ten actions", () => {
+describe("Server Action gates - an anonymous caller is refused by all twelve actions", () => {
   it.each(CALLS.map((call) => [call.name, call] as const))(
     "%s refuses without a session",
     async (_name, call) => {
@@ -256,13 +360,13 @@ describe("Server Action gates - an anonymous caller is refused by all ten action
     },
   );
 
-  it("covers all ten actions in the permission boundary", () => {
+  it("covers all twelve actions in the permission boundary", () => {
     // Pinned so a new Server Action added without a gate shows up as a failing count
     // rather than as an untested write path.
-    expect(CALLS).toHaveLength(10);
+    expect(CALLS).toHaveLength(12);
   });
 
-  it("writes nothing to the database across all ten refusals", async () => {
+  it("writes nothing to the database across all twelve refusals", async () => {
     for (const call of CALLS) {
       await call.run();
     }
