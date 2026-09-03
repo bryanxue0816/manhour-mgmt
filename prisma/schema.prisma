@@ -340,10 +340,15 @@ model WorkCalendar {
 }
 
 /// Per-job-title exclusion rules for attendance aggregation (D-109).
-/// Preseeded from the D-107 (personnel) and D-108 (overtime) exclusion sets,
-/// extended by D-161 with 工场长 / 高级课长 (5 rows -> 7 rows). The two sets are NOT
-/// the same size: personnel exclusion applies to 3 titles (部长 / 项目部长 / 副总经理),
-/// overtime exclusion to all 7 (D-237).
+/// Preseeded from the D-107 (personnel) and D-108 (overtime) exclusion sets, extended by
+/// D-161 with 工场长 / 高级课长 and by D-238 with 项目经理 (5 -> 7 -> 8 rows). The sets are
+/// NOT the same size: personnel exclusion applies to 3 titles (部长 / 项目部长 / 副总经理),
+/// overtime exclusion to 7, and one row (项目课长, D-238) excludes NEITHER.
+///
+/// A both-false row is behaviourally identical to no row at all - ruleVerdict() returns
+/// the same verdict for a map miss and for a both-false hit. 项目课长 is kept anyway as
+/// documentation that the title exists but no rule acts on it; the consequence is that
+/// its loss has no runtime symptom, so prisma/seed.ts asserts the row count instead.
 ///
 /// jobTitle is matched by exact string with no alias table - unlike Section, which has
 /// SectionAlias for a measured homoglyph trap. A title spelled 工場長 instead of 工场长

@@ -51,6 +51,7 @@ const FISCAL_MONTHS = 12;
  */
 const EXPECTED_DEPARTMENTS = 7;
 const EXPECTED_SECTIONS = 24;
+const EXPECTED_JOB_TITLE_RULES = 8; // D-107/D-108 + D-161/D-237/D-238
 
 /**
  * Fails the seed when a written count does not match the agreed scope.
@@ -74,16 +75,33 @@ function assertSeedCount(label: string, actual: number, expected: number): void 
  * overtime excluded (their overtime is not compensated the same way).
  *
  * D-161 added 工场长 and 高级课长, taking this from 5 rows to 7. D-237 corrected their
- * flags: they are overtime-only exclusions like 课长, NOT both-list exclusions. Only
- * three titles ever drop personnel hours - 部长, 项目部长, 副总经理. Getting this wrong
- * over-deducts personnel hours with no error anywhere, so the two lists are stated
- * separately here:
+ * flags: they are overtime-only exclusions like 课长, NOT both-list exclusions. D-238
+ * added 项目经理 (overtime-only) and cleared BOTH of 项目课长's flags, taking the table to
+ * 8 rows. Only three titles ever drop personnel hours - 部长, 项目部长, 副总经理. Getting
+ * this wrong over-deducts personnel hours with no error anywhere, so the sets are stated
+ * separately here rather than left to be read off the rows:
  *
  *   personnel excluded (3): 部长, 项目部长, 副总经理
- *   overtime  excluded (7): all rows below
+ *   overtime  excluded (7): those 3, plus 工场长, 高级课长, 课长, 项目经理
+ *   excluded from neither (1): 项目课长
  *
- * Note that widening the exclusion set does NOT necessarily lower a total: 课长
- * aggregates to negative overtime in the real data, so excluding it raises the sum.
+ * 项目课长 is deliberately kept as a both-false row even though it is behaviourally
+ * IDENTICAL to having no row at all: ruleVerdict() returns
+ * {excludedPersonnel: false, excludedOvertime: false} both on a map miss and on a
+ * both-false hit. The row is documentation - the title exists in the org chart but no
+ * rule acts on it - so nobody re-derives an exclusion by guessing from its absence. The
+ * flip side is that its disappearance produces no runtime symptom whatsoever;
+ * assertSeedCount("job title rules", ..., 8) below is the ONLY thing that would catch it.
+ *
+ * 系长 is intentionally absent for the opposite reason: it is a 一线 title, so both its
+ * personnel and overtime hours count, and that is exactly what "no rule" already yields
+ * (216 rows in the real data fall through this way). Adding a both-false row for it would
+ * be equally inert; the 8-row count is the assertion, so do not pad it.
+ *
+ * Note that widening the exclusion set does NOT necessarily lower a total: both 课长 and
+ * 项目经理 aggregate to NEGATIVE overtime in the real data (项目经理 measured at -7 H over
+ * 8/26-31, 54 rows), so excluding them RAISES the overtime sum. Overtime is legally
+ * negative and deliberately unclamped - see the D-105 note in src/lib/db/hours.ts.
  */
 const JOB_TITLE_RULES: readonly JobTitleRuleDto[] = [
   {
@@ -123,10 +141,18 @@ const JOB_TITLE_RULES: readonly JobTitleRuleDto[] = [
     remark: "Section head - personnel hours counted, overtime excluded.",
   },
   {
-    jobTitle: "项目课长",
+    jobTitle: "项目经理",
     excludePersonnelHours: false,
     excludeOvertimeHours: true,
-    remark: "Project section head - same treatment as 课长.",
+    remark: "Project manager (D-238) - personnel hours counted, overtime excluded.",
+  },
+  {
+    jobTitle: "项目课长",
+    excludePersonnelHours: false,
+    excludeOvertimeHours: false,
+    remark:
+      "Project section head (D-238) - exists in org chart but no rule acts on it. " +
+      "Both flags false: behaviourally identical to no row, retained for documentation.",
   },
 ];
 
@@ -305,7 +331,10 @@ async function main(): Promise<void> {
   );
 
   const ruleCount = await upsertJobTitleRulesBulk(JOB_TITLE_RULES);
-  console.log(`  job titles   : ${ruleCount} rules (expected 7, D-107/D-108 + D-161)`);
+  console.log(
+    `  job titles   : ${ruleCount} rules (expected 8, D-107/D-108 + D-161/D-237/D-238)`,
+  );
+  assertSeedCount("job title rules", ruleCount, EXPECTED_JOB_TITLE_RULES);
 
   const aliasCount = await upsertSectionAliasesBulk(buildSectionAliasInputs(sectionIds));
   console.log(`  sect aliases : ${aliasCount} rows`);
