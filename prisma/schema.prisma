@@ -341,7 +341,13 @@ model WorkCalendar {
 
 /// Per-job-title exclusion rules for attendance aggregation (D-109).
 /// Preseeded from the D-107 (personnel) and D-108 (overtime) exclusion sets,
-/// extended by D-161 with 工场长 / 高级课长 (5 rows -> 7 rows).
+/// extended by D-161 with 工场长 / 高级课长 (5 rows -> 7 rows). The two sets are NOT
+/// the same size: personnel exclusion applies to 3 titles (部长 / 项目部长 / 副总经理),
+/// overtime exclusion to all 7 (D-237).
+///
+/// jobTitle is matched by exact string with no alias table - unlike Section, which has
+/// SectionAlias for a measured homoglyph trap. A title spelled 工場長 instead of 工场长
+/// simply misses, and ruleVerdict() reports "not excluded" with no error anywhere.
 model JobTitleRule {
   jobTitle              String   @id
   /// D-107: exclude this title's hours from personnelHours.

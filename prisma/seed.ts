@@ -73,9 +73,17 @@ function assertSeedCount(label: string, actual: number, expected: number): void 
  * and overtime hours both drop out, while a 課長 keeps personnel hours but has
  * overtime excluded (their overtime is not compensated the same way).
  *
- * D-161 added 工场长 and 高级课长 to both lists, taking this from 5 rows to 7. Note
- * that widening the exclusion set does NOT necessarily lower a total: 课长 aggregates
- * to negative overtime in the real data, so excluding it raises the overtime sum.
+ * D-161 added 工场长 and 高级课长, taking this from 5 rows to 7. D-237 corrected their
+ * flags: they are overtime-only exclusions like 课长, NOT both-list exclusions. Only
+ * three titles ever drop personnel hours - 部长, 项目部长, 副总经理. Getting this wrong
+ * over-deducts personnel hours with no error anywhere, so the two lists are stated
+ * separately here:
+ *
+ *   personnel excluded (3): 部长, 项目部长, 副总经理
+ *   overtime  excluded (7): all rows below
+ *
+ * Note that widening the exclusion set does NOT necessarily lower a total: 课长
+ * aggregates to negative overtime in the real data, so excluding it raises the sum.
  */
 const JOB_TITLE_RULES: readonly JobTitleRuleDto[] = [
   {
@@ -98,15 +106,15 @@ const JOB_TITLE_RULES: readonly JobTitleRuleDto[] = [
   },
   {
     jobTitle: "工场长",
-    excludePersonnelHours: true,
+    excludePersonnelHours: false,
     excludeOvertimeHours: true,
-    remark: "Plant manager (D-161) - management post, excluded from both totals.",
+    remark: "Plant manager (D-161/D-237) - personnel hours counted, overtime excluded.",
   },
   {
     jobTitle: "高级课长",
-    excludePersonnelHours: true,
+    excludePersonnelHours: false,
     excludeOvertimeHours: true,
-    remark: "Senior section head (D-161) - management post, excluded from both totals.",
+    remark: "Senior section head (D-161/D-237) - personnel hours counted, overtime excluded.",
   },
   {
     jobTitle: "课长",

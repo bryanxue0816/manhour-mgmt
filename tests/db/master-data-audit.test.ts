@@ -194,7 +194,7 @@ function makeDb(): FakeDb {
     rules: [
       {
         jobTitle: "工场长",
-        excludePersonnelHours: true,
+        excludePersonnelHours: false,
         excludeOvertimeHours: true,
         remark: null,
         createdAt: new Date(0),
@@ -202,7 +202,7 @@ function makeDb(): FakeDb {
       },
       {
         jobTitle: "高级课长",
-        excludePersonnelHours: true,
+        excludePersonnelHours: false,
         excludeOvertimeHours: true,
         remark: null,
         createdAt: new Date(0),
@@ -320,8 +320,8 @@ describe("recordMasterDataSnapshot", () => {
 
     expect(Object.keys(snapshot)).toEqual(["rules"]);
     expect(snapshot.rules).toEqual([
-      { jobTitle: "工场长", excludePersonnelHours: true, excludeOvertimeHours: true, remark: null },
-      { jobTitle: "高级课长", excludePersonnelHours: true, excludeOvertimeHours: true, remark: null },
+      { jobTitle: "工场长", excludePersonnelHours: false, excludeOvertimeHours: true, remark: null },
+      { jobTitle: "高级课长", excludePersonnelHours: false, excludeOvertimeHours: true, remark: null },
     ]);
   });
 

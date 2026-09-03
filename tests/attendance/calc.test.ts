@@ -51,11 +51,11 @@ const ZERO_HOURS: AttendanceHourInputs = {
   miscarriageLeave: 0,
 };
 
-/** The seeded exclusion set, trimmed to the titles these tests exercise (D-107/D-108/D-161). */
+/** The seeded exclusion set, trimmed to the titles these tests exercise (D-107/D-108/D-161/D-237). */
 const RULES: readonly JobTitleRuleDto[] = [
   { jobTitle: "部长", excludePersonnelHours: true, excludeOvertimeHours: true, remark: null },
-  { jobTitle: "工场长", excludePersonnelHours: true, excludeOvertimeHours: true, remark: null },
-  { jobTitle: "高级课长", excludePersonnelHours: true, excludeOvertimeHours: true, remark: null },
+  { jobTitle: "工场长", excludePersonnelHours: false, excludeOvertimeHours: true, remark: null },
+  { jobTitle: "高级课长", excludePersonnelHours: false, excludeOvertimeHours: true, remark: null },
   { jobTitle: "课长", excludePersonnelHours: false, excludeOvertimeHours: true, remark: null },
 ];
 
@@ -238,17 +238,17 @@ describe("D-107/D-108 职务排除判定", () => {
     });
   });
 
-  it("部长以上两侧皆排除, 课长仅排除加班", () => {
+  it("部长两侧皆排除, 工场长/高级课长/课长仅排除加班 (D-237)", () => {
     expect(ruleVerdict("部长", RULE_INDEX)).toEqual({
       excludedPersonnel: true,
       excludedOvertime: true,
     });
     expect(ruleVerdict("工场长", RULE_INDEX)).toEqual({
-      excludedPersonnel: true,
+      excludedPersonnel: false,
       excludedOvertime: true,
     });
     expect(ruleVerdict("高级课长", RULE_INDEX)).toEqual({
-      excludedPersonnel: true,
+      excludedPersonnel: false,
       excludedOvertime: true,
     });
     expect(ruleVerdict("课长", RULE_INDEX)).toEqual({
