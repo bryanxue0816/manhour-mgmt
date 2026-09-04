@@ -149,6 +149,23 @@ export interface ActualAdjustmentInput {
  * personnelHours + overtimeHours. It is not blended with the adjustment. The cost of
  * that choice is that a read point nobody migrated shows an UNDERSTATED number - chosen
  * on purpose, because understated-and-noticeable beats plausible-and-wrong.
+ *
+ * THAT COST CAME DUE, and the record matters more than the rationale. The dashboard was
+ * the unmigrated read point: a +1 slip on 财务课 26/08 rendered 1,073 on /actuals and
+ * 1,072 on the 看板 simultaneously, through a full type-check and a green test suite,
+ * because reading the wrong-but-present field is not a type error. Fixed 2026-09-04 by
+ * pointing the adapter at findEffectiveActualsByFiscalYear() and narrowing
+ * OrgTreeSource.actuals to REQUIRE this type, so folded rows no longer compile there.
+ *
+ * Both migrated read paths are therefore closed:
+ *   - /actuals            -> findEffectiveActualsByFiscalYear() (D-233)
+ *   - 看板 / dashboard     -> same, via adapter/load-org.ts
+ * findActualsByFiscalYear() remains correct ONLY for attendance-provenance views, which
+ * answer "what did the import itself produce?" rather than "what is the 实绩?".
+ *
+ * So before adding a consumer: if it reports a total to a human, read `effectiveHours`.
+ * Reaching for `totalHours` outside a provenance panel reopens this exact bug, and it
+ * will look like working code again.
  */
 export interface ActualEffectiveRow extends ActualRow {
   /** Sum of un-revoked slips for this section-month. 0 when there are none. */

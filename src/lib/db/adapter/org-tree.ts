@@ -43,7 +43,7 @@
 import type { Dept, MonthlyHours, OrgRoot, Section } from "@/types/manhour";
 
 import { FISCAL_MONTH_COUNT, assertFiscalMonth, monthToIndex } from "../date";
-import type { ActualRow, OrgSnapshot, PlanRow } from "../types";
+import type { ActualEffectiveRow, OrgSnapshot, PlanRow } from "../types";
 
 /** Default label for the company-level root node. */
 const DEFAULT_ROOT_NAME = "全公司";
@@ -53,8 +53,18 @@ export interface OrgTreeSource {
   snapshot: OrgSnapshot;
   /** Plan rows for one fiscal year. Missing (section, month) pairs become zeros. */
   plans: readonly PlanRow[];
-  /** Actual rows for one fiscal year. Missing (section, month) pairs become zeros. */
-  actuals: readonly ActualRow[];
+  /**
+   * Composed actual rows for one fiscal year. Missing (section, month) pairs become zeros.
+   *
+   * DELIBERATELY REQUIRES ActualEffectiveRow, not ActualRow (D-233). The dashboard reports
+   * a total a manager acts on, so it must read 折算 + 未撤销调整单 - and the narrower type
+   * is the only thing that says so at compile time. A plain folded row is assignable to
+   * ActualRow, so accepting ActualRow here would let the raw repository back in silently:
+   * that is exactly how the 财务课 26/08 incident shipped, showing 1,073 on /actuals and
+   * 1,072 on the 看板 in the same breath. Callers holding only folded rows now fail to
+   * compile, which is the point.
+   */
+  actuals: readonly ActualEffectiveRow[];
   /** Root node label. Defaults to '全公司'. */
   rootName?: string;
 }
@@ -119,7 +129,10 @@ function addMonthsInto(dest: MonthlyHours[], src: readonly MonthlyHours[]): void
  */
 function assertSingleFiscalYear(
   plans: readonly PlanRow[],
-  actuals: readonly ActualRow[],
+  // Structurally typed on purpose, matching check() below: this guard reads nothing but
+  // fiscalYearId, and it must keep guarding if the actual row shape changes again. Pinning
+  // it to a concrete row type would make the guard follow that type's fate.
+  actuals: readonly { fiscalYearId: string }[],
 ): void {
   let expected: string | undefined;
   let seen = false;
@@ -168,7 +181,7 @@ function assertSingleFiscalYear(
 function groupMonthsBySection(
   sectionIds: readonly string[],
   plans: readonly PlanRow[],
-  actuals: readonly ActualRow[],
+  actuals: readonly ActualEffectiveRow[],
 ): Map<string, MonthlyHours[]> {
   assertSingleFiscalYear(plans, actuals);
 
@@ -196,10 +209,17 @@ function groupMonthsBySection(
     const months = bySection.get(row.sectionId);
     if (!months) continue;
     const slot = months[monthToIndex(row.month)]!;
-    // totalHours is the persisted denormalised sum (personnel + overtime) and is
-    // what the dashboard treats as "actual". Overtime may be negative (D-105),
-    // so this value is NOT clamped to zero.
-    slot.actual = row.totalHours;
+    // effectiveHours, NOT totalHours (D-233). totalHours is the persisted denormalised
+    // fold (personnel + overtime); effectiveHours adds the un-revoked adjustment slips,
+    // and that sum is what "实绩" means on every screen a manager reads a total from.
+    //
+    // Reading totalHours here is the 财务课 26/08 bug: a +1 slip left the 看板 on 1,072
+    // while /actuals showed 1,073. It compiled and type-checked the whole time, because
+    // ActualEffectiveRow extends ActualRow - the wrong field is always in scope.
+    //
+    // Both components may be negative: overtime by D-105, adjustments by design (a hand
+    // tally below the fold), so this value is NOT clamped to zero.
+    slot.actual = row.effectiveHours;
   }
 
   return bySection;

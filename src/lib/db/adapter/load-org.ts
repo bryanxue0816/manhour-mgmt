@@ -10,7 +10,7 @@
 
 import type { OrgRoot } from "@/types/manhour";
 
-import { findActualsByFiscalYear } from "../actual.repo";
+import { findEffectiveActualsByFiscalYear } from "../actual-effective.repo";
 import { loadOrgSnapshot } from "../org.repo";
 import { findPlansByFiscalYear } from "../plan.repo";
 import { buildOrgRoot } from "./org-tree";
@@ -31,10 +31,19 @@ export async function loadOrgRoot(
   // Promise.all rather than sequential awaits: the three queries are
   // independent, and loadOrgSnapshot() already batches its own two reads into a
   // transaction. Total payload for a full fiscal year is under 50KB.
-  const [snapshot, plans, actuals] = await Promise.all([
+  //
+  // findEffectiveActualsByFiscalYear() resolves to { rows, adjustedMonths }, not a bare
+  // array - hence the destructured `.rows`. It reads the fold and the slips inside ONE
+  // transaction of its own, so a scheduled re-fold (09:05 / 15:05) cannot land between
+  // them and raise a false drift flag.
+  //
+  // `adjustedMonths` is deliberately dropped here: surfacing the △ footnote on the
+  // dashboard is a separate change, and it belongs in loadDashboardOrg() where the
+  // infrastructure-error guard lives (D-158), not in this pure IO wrapper.
+  const [snapshot, plans, { rows: actuals }] = await Promise.all([
     loadOrgSnapshot(),
     findPlansByFiscalYear(fiscalYearId),
-    findActualsByFiscalYear(fiscalYearId),
+    findEffectiveActualsByFiscalYear(fiscalYearId),
   ]);
 
   return buildOrgRoot({ snapshot, plans, actuals, rootName });
