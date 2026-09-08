@@ -89,6 +89,21 @@ services:
       # reason: a backup the operator cannot reach from the host is not a backup.
       - ./backups:/app/backups
 
+      # Attendance source directory, mounted READ-ONLY. This is NOT application
+      # config: src/ contains zero references to it and the app's entire env
+      # surface is the 6 vars in .env.production.example. It is consumed only by
+      # `node scripts/fetch-attendance.ts --dir /mnt/hr`, invoked from
+      # /opt/manhour-mgmt/scripts/fetch-attendance.sh under cron
+      # (`5 7-20 * * *` — hourly at :05 from 07:00 to 20:00, 14 runs/day).
+      #
+      # WHY THIS LINE IS EASY TO LOSE: it was hand-added on the server on
+      # 2026-09-04 and existed only there until 2026-09-08. A package that
+      # overwrites app/ without it makes every cron run exit 1 with nobody
+      # reading stderr — attendance silently stops importing while the site
+      # keeps serving HTTP 200 off stale data. fetch-attendance.ts has no
+      # default for --dir (D-207), so the failure is total, not degraded.
+      - /mnt/smb_hr:/mnt/hr:ro
+
     # SQLite is a single file accessed by one process. Two app replicas would
     # contend on the same file and, because the schema runs in journal_mode
     # =delete rather than WAL, would produce SQLITE_BUSY under concurrent
