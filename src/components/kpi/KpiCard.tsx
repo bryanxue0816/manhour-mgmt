@@ -12,10 +12,12 @@
  * the other two duplicated a percentage the caption already states in words.
  * The three remaining-hours cards share one threshold (isRemainOnTrack):
  * remainder >= 0 renders a green 😊 pill (exactly 0 is landing on target),
- * < 0 renders a red 😞 pill. The emoji is aria-hidden because the pill text
- * already carries the verdict for screen readers. Status pills keep the brand
- * CSS-variable utilities (bg-challenge / bg-actual) registered in globals.css;
- * no hardcoded hex values.
+ * < 0 renders a red 😞 pill. Each verdict card shows the face twice: a large
+ * decorative face at the right edge as the at-a-glance verdict, and the small
+ * face inside the pill beneath the figure. Both are aria-hidden because the
+ * pill text already carries the verdict for screen readers. Status pills keep
+ * the brand CSS-variable utilities (bg-challenge / bg-actual) registered in
+ * globals.css; no hardcoded hex values.
  */
 import * as React from "react";
 
@@ -77,6 +79,30 @@ function StatusPill({
 }
 
 /**
+ * Body layout shared by the three verdict cards: the figure and its pill on
+ * the left, one oversized verdict face on the right as the card's dominant
+ * visual cue (user-requested 2026-09-09). The large face is purely decorative
+ * - the pill text below the figure is the accessible verdict - hence
+ * aria-hidden. The actual-hours card has no verdict and does not use this.
+ */
+function VerdictCardBody({
+  ok,
+  children,
+}: {
+  ok: boolean;
+  children: React.ReactNode;
+}): React.ReactElement {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="flex min-w-0 flex-col gap-2">{children}</div>
+      <span aria-hidden="true" className="select-none text-7xl leading-none">
+        {ok ? "😊" : "😞"}
+      </span>
+    </div>
+  );
+}
+
+/**
  * Title text for each variant.
  *
  * The three month-scoped cards name the month they report on. The anchored month
@@ -122,7 +148,7 @@ function KpiCardContent({
     case "planRemain": {
       const ok = isRemainOnTrack(data.monthPlanRemain);
       return (
-        <>
+        <VerdictCardBody ok={ok}>
           <div className="flex items-baseline gap-1">
             <span className="text-3xl font-bold tabular-nums">
               {formatSigned(data.monthPlanRemain)}
@@ -130,13 +156,13 @@ function KpiCardContent({
             <span className="text-sm text-muted-foreground">H</span>
           </div>
           <StatusPill ok={ok} okLabel="达成" ngLabel="超支" />
-        </>
+        </VerdictCardBody>
       );
     }
     case "chalRemain": {
       const ok = isRemainOnTrack(data.monthChalRemain);
       return (
-        <>
+        <VerdictCardBody ok={ok}>
           <div className="flex items-baseline gap-1">
             <span className="text-3xl font-bold tabular-nums">
               {formatSigned(data.monthChalRemain)}
@@ -144,7 +170,7 @@ function KpiCardContent({
             <span className="text-sm text-muted-foreground">H</span>
           </div>
           <StatusPill ok={ok} okLabel="优于挑战" ngLabel="未达挑战" />
-        </>
+        </VerdictCardBody>
       );
     }
     case "cumRemain": {
@@ -153,7 +179,7 @@ function KpiCardContent({
       const arrow =
         data.cumRemain > 0 ? "▲ " : data.cumRemain < 0 ? "▼ " : "";
       return (
-        <>
+        <VerdictCardBody ok={ok}>
           <div className="flex items-baseline gap-1">
             <span className="text-3xl font-bold tabular-nums">
               {formatSigned(data.cumRemain)}
@@ -164,7 +190,7 @@ function KpiCardContent({
             ok={ok}
             okLabel={`${arrow}距计划 ${formatSigned(data.cumRemain)} H`}
           />
-        </>
+        </VerdictCardBody>
       );
     }
   }
