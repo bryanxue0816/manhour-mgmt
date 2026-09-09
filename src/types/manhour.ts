@@ -165,7 +165,7 @@ export interface KpiData {
   usedPct: number;
   /** <90% green / 90-100% yellow / >100% red */
   usedTier: UsageTier;
-  /** monthPlan - monthActual (>0 = on track) */
+  /** monthPlan - monthActual (>=0 = on track; exactly 0 is landing on target, see isRemainOnTrack) */
   monthPlanRemain: number;
   /** monthChallenge - monthActual */
   monthChalRemain: number;

@@ -14,6 +14,7 @@ import {
   formatHoursUnknown,
   formatHoursValue,
   formatSignedHours,
+  formatSignedHoursBare,
 } from '@/lib/format';
 
 describe('formatSignedHours', () => {
@@ -42,6 +43,39 @@ describe('formatSignedHours', () => {
   it('keeps the thousands separator and one decimal', () => {
     expect(formatSignedHours(4631.5)).toBe('+4,631.5');
     expect(formatSignedHours(-4631.5)).toBe('-4,631.5');
+  });
+});
+
+describe('formatSignedHoursBare', () => {
+  it('prefixes a positive figure with a plus', () => {
+    expect(formatSignedHoursBare(760)).toBe('+760');
+  });
+
+  it('keeps the minus on a negative figure', () => {
+    expect(formatSignedHoursBare(-2335)).toBe('-2335');
+  });
+
+  it('renders exact zero and negative zero without a sign', () => {
+    expect(formatSignedHoursBare(0)).toBe('0');
+    expect(formatSignedHoursBare(-0)).toBe('0');
+  });
+
+  it('keeps the half-hour that attendance data is made of', () => {
+    // Attendance arrives in 0.5 steps. The verdict predicate reads the raw
+    // remainder (>= 0 is on track), so a display that rounds -0.5 to "0"
+    // paints a red "0 H" card that contradicts its own verdict.
+    expect(formatSignedHoursBare(0.5)).toBe('+0.5');
+    expect(formatSignedHoursBare(-0.5)).toBe('-0.5');
+  });
+
+  it('renders integers without a trailing .0', () => {
+    expect(formatSignedHoursBare(10182)).toBe('+10182');
+  });
+
+  it('drops the thousands separator even at five digits', () => {
+    // KPI cards render in a fixed-width slot - see formatHoursBare for why the
+    // comma is deliberately absent there.
+    expect(formatSignedHoursBare(10182.5)).toBe('+10182.5');
   });
 });
 

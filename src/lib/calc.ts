@@ -60,6 +60,12 @@ function monthLabel(axis: MonthAxis, i: number): string {
 /**
  * Build an achievement cell from a target and an actual value.
  * `diff = target - actual`; `achieved` is true when there is remaining budget.
+ *
+ * Deliberately strict `> 0`, NOT `>= 0`: this achievement table keeps
+ * "exactly on target" unachieved, whereas the KPI verdict cards treat landing
+ * on target as a win via `isRemainOnTrack` (product decision 2026-09-09,
+ * scoped to the KPI cards). Aligning the two surfaces needs a separate
+ * table-level decision - do not change one to match the other without it.
  */
 function makeCell(target: number, actual: number): AchievementCell {
   const diff = target - actual;

@@ -18,7 +18,10 @@
  * | `formatHoursBare`    | `4632`     | KPI cards                              |
  *
  * `formatSignedHours` sits apart from those four: it renders a CHANGE (`-45`), not a
- * quantity, so it always carries its sign.
+ * quantity, so it always carries its sign. `formatSignedHoursBare` is the same idea
+ * for KPI verdict cards: no separator, and the one decimal is kept so the displayed
+ * remainder cannot disagree with the card's on-track verdict (a -0.5 remainder is a
+ * real state - attendance arrives in 0.5 steps).
  *
  * `formatHoursBare` deliberately drops the separator: the KPI card renders its
  * figure at display size in a fixed-width slot, where a comma costs a character
@@ -45,6 +48,12 @@ const HOURS_FORMAT: Readonly<Intl.NumberFormatOptions> = {
 /** Whole hours - the plan import template accepts integers only. */
 const WHOLE_HOURS_FORMAT: Readonly<Intl.NumberFormatOptions> = {
   maximumFractionDigits: 0,
+};
+
+/** One decimal like HOURS_FORMAT, but without thousands grouping (KPI slots). */
+const SIGNED_BARE_FORMAT: Readonly<Intl.NumberFormatOptions> = {
+  maximumFractionDigits: 1,
+  useGrouping: false,
 };
 
 /** Format an hour count with a thousands separator and the "H" unit. */
@@ -90,6 +99,25 @@ export function formatHoursBare(value: number): string {
 export function formatSignedHours(value: number): string {
   if (value === 0) return formatHoursValue(0);
   return value > 0 ? `+${formatHoursValue(value)}` : formatHoursValue(value);
+}
+
+/**
+ * Signed hours WITHOUT separator or rounding, for KPI verdict cards - the
+ * signed sibling of {@link formatHoursBare}. At most one decimal (the 0.5
+ * attendance step) and no thousands grouping, since the figure renders in a
+ * fixed-width slot.
+ *
+ * The decimal must survive here even though the sibling quantity cards round
+ * to integers: the verdict face reads the RAW remainder (`>= 0` is on track),
+ * so rounding -0.5 to "0" would paint a red "0 H" card that contradicts its
+ * own 😞 verdict, and +0.5 rounded up to "1" invents half an hour of buffer.
+ * Integers still render without a trailing ".0". The `value === 0` guard
+ * normalises negative zero for the same reason as {@link formatSignedHours}.
+ */
+export function formatSignedHoursBare(value: number): string {
+  if (value === 0) return '0';
+  const text = value.toLocaleString('zh-CN', SIGNED_BARE_FORMAT);
+  return value > 0 ? `+${text}` : text;
 }
 
 /**

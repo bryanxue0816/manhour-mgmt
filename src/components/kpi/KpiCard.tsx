@@ -29,7 +29,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { isRemainOnTrack } from "@/lib/calc";
-import { formatHoursBare } from "@/lib/format";
+import { formatHoursBare, formatSignedHoursBare } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { KpiData } from "@/types/manhour";
 
@@ -43,12 +43,6 @@ export interface KpiCardProps {
 
 export interface KpiRowProps {
   data: KpiData;
-}
-
-/** Format a number with an explicit + sign when positive; negatives keep -. */
-function formatSigned(n: number): string {
-  const rounded = Math.round(n);
-  return rounded > 0 ? `+${rounded}` : `${rounded}`;
 }
 
 /** Compact text-only status pill: green wording when `ok`, red otherwise.
@@ -156,7 +150,7 @@ function KpiCardContent({
         <VerdictCardBody ok={ok}>
           <div className="flex items-baseline gap-1">
             <span className="text-3xl font-bold tabular-nums">
-              {formatSigned(data.monthPlanRemain)}
+              {formatSignedHoursBare(data.monthPlanRemain)}
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
@@ -170,7 +164,7 @@ function KpiCardContent({
         <VerdictCardBody ok={ok}>
           <div className="flex items-baseline gap-1">
             <span className="text-3xl font-bold tabular-nums">
-              {formatSigned(data.monthChalRemain)}
+              {formatSignedHoursBare(data.monthChalRemain)}
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
@@ -187,13 +181,13 @@ function KpiCardContent({
         <VerdictCardBody ok={ok}>
           <div className="flex items-baseline gap-1">
             <span className="text-3xl font-bold tabular-nums">
-              {formatSigned(data.cumRemain)}
+              {formatSignedHoursBare(data.cumRemain)}
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
           <StatusPill
             ok={ok}
-            okLabel={`${arrow}距计划 ${formatSigned(data.cumRemain)} H`}
+            okLabel={`${arrow}距计划 ${formatSignedHoursBare(data.cumRemain)} H`}
           />
         </VerdictCardBody>
       );
