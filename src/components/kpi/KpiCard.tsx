@@ -3,15 +3,19 @@
  *
  * Renders four shadcn Cards in a responsive grid:
  *   1. actual     - current-month actual hours vs budget
- *   2. planRemain - plan remaining for the month (+ status pill)
- *   3. chalRemain - challenge remaining for the month (+ status pill)
- *   4. cumRemain  - cumulative remaining vs plan
+ *   2. planRemain - plan remaining for the month (😊/😞 status pill)
+ *   3. chalRemain - challenge remaining for the month (😊/😞 status pill)
+ *   4. cumRemain  - cumulative remaining vs plan (😊/😞 status pill)
  *
- * Each card is a headline figure plus one caption line. The cards carry no
- * progress bars: two of the four were pinned at 100% and encoded nothing, and
- * the other two duplicated a percentage that the caption already states in
- * words. Status pills keep the brand CSS-variable utilities (bg-challenge /
- * bg-actual) registered in globals.css; no hardcoded hex values.
+ * Each card is a headline figure plus one caption or pill line. The cards carry
+ * no progress bars: two of the four were pinned at 100% and encoded nothing, and
+ * the other two duplicated a percentage the caption already states in words.
+ * The three remaining-hours cards share one threshold (isRemainOnTrack):
+ * remainder >= 0 renders a green 😊 pill (exactly 0 is landing on target),
+ * < 0 renders a red 😞 pill. The emoji is aria-hidden because the pill text
+ * already carries the verdict for screen readers. Status pills keep the brand
+ * CSS-variable utilities (bg-challenge / bg-actual) registered in globals.css;
+ * no hardcoded hex values.
  */
 import * as React from "react";
 
@@ -21,6 +25,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { isRemainOnTrack } from "@/lib/calc";
 import { formatHoursBare } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { KpiData } from "@/types/manhour";
@@ -43,24 +48,29 @@ function formatSigned(n: number): string {
   return rounded > 0 ? `+${rounded}` : `${rounded}`;
 }
 
-/** Compact status pill: green when `ok`, red otherwise. Uses brand colors
- *  with 20% opacity backgrounds via Tailwind 4 opacity modifiers. */
+/** Compact status pill with a verdict face: green 😊 when `ok`, red 😞 otherwise.
+ *  Uses brand colors with 20% opacity backgrounds via Tailwind 4 opacity
+ *  modifiers. `ngLabel` defaults to `okLabel` for cards whose text only varies
+ *  by the leading ▲/▼ arrow, which is already derived from the same value. */
 function StatusPill({
   ok,
   okLabel,
-  ngLabel,
+  ngLabel = okLabel,
 }: {
   ok: boolean;
   okLabel: string;
-  ngLabel: string;
+  ngLabel?: string;
 }): React.ReactElement {
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
+        "inline-flex w-fit items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
         ok ? "bg-challenge/20 text-challenge" : "bg-actual/20 text-actual",
       )}
     >
+      <span aria-hidden="true" className="select-none">
+        {ok ? "😊" : "😞"}
+      </span>
       {ok ? okLabel : ngLabel}
     </span>
   );
@@ -110,7 +120,7 @@ function KpiCardContent({
       );
     }
     case "planRemain": {
-      const ok = data.monthPlanRemain > 0;
+      const ok = isRemainOnTrack(data.monthPlanRemain);
       return (
         <>
           <div className="flex items-baseline gap-1">
@@ -124,7 +134,7 @@ function KpiCardContent({
       );
     }
     case "chalRemain": {
-      const ok = data.monthChalRemain > 0;
+      const ok = isRemainOnTrack(data.monthChalRemain);
       return (
         <>
           <div className="flex items-baseline gap-1">
@@ -138,6 +148,10 @@ function KpiCardContent({
       );
     }
     case "cumRemain": {
+      const ok = isRemainOnTrack(data.cumRemain);
+      // No arrow at exactly 0: there is no direction to point at.
+      const arrow =
+        data.cumRemain > 0 ? "▲ " : data.cumRemain < 0 ? "▼ " : "";
       return (
         <>
           <div className="flex items-baseline gap-1">
@@ -146,9 +160,10 @@ function KpiCardContent({
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
-          <p className="text-xs text-muted-foreground">
-            距计划 {formatSigned(data.cumRemain)} H
-          </p>
+          <StatusPill
+            ok={ok}
+            okLabel={`${arrow}距计划 ${formatSigned(data.cumRemain)} H`}
+          />
         </>
       );
     }

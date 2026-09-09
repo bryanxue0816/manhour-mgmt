@@ -184,6 +184,19 @@ export function computeKpi(
   };
 }
 
+/**
+ * Decide whether a "remaining hours" figure (target - actual) counts as on track.
+ *
+ * Hours are lower-is-better, so positive remainder means actual is below target.
+ * The boundary is `>= 0`: exactly 0 is landing squarely on the target and counts
+ * as achieved (matches the `face()` predicate in the 2026-08-03 HTML prototype;
+ * the cards previously used `> 0`, which mislabelled a dead-on-target 0 as 超支).
+ * Shared by all three remaining-hours KPI cards so the boundary cannot drift.
+ */
+export function isRemainOnTrack(remain: number): boolean {
+  return remain >= 0;
+}
+
 // ---------------------------------------------------------------------------
 // Combo chart
 // ---------------------------------------------------------------------------
