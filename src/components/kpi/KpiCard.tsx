@@ -10,15 +10,21 @@
  * Each card is a headline figure plus one caption or pill line. The cards carry
  * no progress bars: two of the four were pinned at 100% and encoded nothing, and
  * the other two duplicated a percentage the caption already states in words.
- * The three remaining-hours cards share one threshold (isRemainOnTrack):
- * remainder >= 0 renders a green 😊 verdict (exactly 0 is landing on target),
- * < 0 renders a red 😞 verdict. Each verdict card carries exactly one face:
- * a large decorative emoji at the right edge as the at-a-glance cue. The pill
- * beneath the figure is colored wording only, no emoji (user decision
- * 2026-09-09: one face per card). The emoji is aria-hidden because the pill
- * text already carries the verdict for screen readers. Status pills keep the
- * brand CSS-variable utilities (bg-challenge / bg-actual) registered in
- * globals.css; no hardcoded hex values.
+ * The three remaining-hours cards share one verdict resolved by kpiVerdict()
+ * (src/lib/kpi-verdict.ts), which binds the shared on-track predicate
+ * (remainder >= 0; exactly 0 is landing on target) to one verbatim label pair
+ * 达成/不达成. Since 2026-09-09 all three pills draw wording from that single
+ * source - previously the cards said 达成/超支 and 优于挑战/未达挑战, and a third
+ * carried a numeric arrow/delta sentence; the wordings had drifted apart - so
+ * the labels cannot diverge again. Each verdict card
+ * carries exactly one face: a large decorative emoji at the right edge as the
+ * at-a-glance cue. The pill beneath the figure is colored wording only, no
+ * emoji (user decision 2026-09-09: one face per card), sized text-2xl so the
+ * verdict reads at a glance (same decision: make the badge prominent). The
+ * emoji is aria-hidden because the pill text already carries the verdict for
+ * screen readers. Status pills keep the brand CSS-variable utilities
+ * (bg-challenge / bg-actual) registered in globals.css; no hardcoded hex
+ * values.
  */
 import * as React from "react";
 
@@ -28,8 +34,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { isRemainOnTrack } from "@/lib/calc";
 import { formatHoursBare, formatSignedHoursBare } from "@/lib/format";
+import { kpiVerdict } from "@/lib/kpi-verdict";
 import { cn } from "@/lib/utils";
 import type { KpiData } from "@/types/manhour";
 
@@ -49,26 +55,26 @@ export interface KpiRowProps {
  *  Uses brand colors with 20% opacity backgrounds via Tailwind 4 opacity
  *  modifiers. The verdict face lives only in the large decorative emoji of
  *  VerdictCardBody - the pill itself deliberately carries no emoji (user
- *  decision 2026-09-09: one face per card). `ngLabel` defaults to `okLabel`
- *  for cards whose text only varies by the leading ▲/▼ arrow, which is
- *  already derived from the same value. */
+ *  decision 2026-09-09: one face per card). Wording always comes from
+ *  kpiVerdict() (single label source, same decision 2026-09-09), so the three
+ *  cards cannot drift apart again. Sized text-2xl (24px, 2x the original
+ *  text-xs) per user request for an at-a-glance verdict; leading-none and the
+ *  larger padding keep the capsule tight at the bigger size. */
 function StatusPill({
   ok,
-  okLabel,
-  ngLabel = okLabel,
+  label,
 }: {
   ok: boolean;
-  okLabel: string;
-  ngLabel?: string;
+  label: string;
 }): React.ReactElement {
   return (
     <span
       className={cn(
-        "inline-flex w-fit items-center rounded-full px-2 py-0.5 text-xs font-medium",
+        "inline-flex w-fit items-center rounded-full px-4 py-1 text-2xl font-medium leading-none",
         ok ? "bg-challenge/20 text-challenge" : "bg-actual/20 text-actual",
       )}
     >
-      {ok ? okLabel : ngLabel}
+      {label}
     </span>
   );
 }
@@ -145,50 +151,44 @@ function KpiCardContent({
       );
     }
     case "planRemain": {
-      const ok = isRemainOnTrack(data.monthPlanRemain);
+      const verdict = kpiVerdict(data.monthPlanRemain);
       return (
-        <VerdictCardBody ok={ok}>
+        <VerdictCardBody ok={verdict.ok}>
           <div className="flex items-baseline gap-1">
             <span className="text-3xl font-bold tabular-nums">
               {formatSignedHoursBare(data.monthPlanRemain)}
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
-          <StatusPill ok={ok} okLabel="达成" ngLabel="超支" />
+          <StatusPill ok={verdict.ok} label={verdict.label} />
         </VerdictCardBody>
       );
     }
     case "chalRemain": {
-      const ok = isRemainOnTrack(data.monthChalRemain);
+      const verdict = kpiVerdict(data.monthChalRemain);
       return (
-        <VerdictCardBody ok={ok}>
+        <VerdictCardBody ok={verdict.ok}>
           <div className="flex items-baseline gap-1">
             <span className="text-3xl font-bold tabular-nums">
               {formatSignedHoursBare(data.monthChalRemain)}
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
-          <StatusPill ok={ok} okLabel="优于挑战" ngLabel="未达挑战" />
+          <StatusPill ok={verdict.ok} label={verdict.label} />
         </VerdictCardBody>
       );
     }
     case "cumRemain": {
-      const ok = isRemainOnTrack(data.cumRemain);
-      // No arrow at exactly 0: there is no direction to point at.
-      const arrow =
-        data.cumRemain > 0 ? "▲ " : data.cumRemain < 0 ? "▼ " : "";
+      const verdict = kpiVerdict(data.cumRemain);
       return (
-        <VerdictCardBody ok={ok}>
+        <VerdictCardBody ok={verdict.ok}>
           <div className="flex items-baseline gap-1">
             <span className="text-3xl font-bold tabular-nums">
               {formatSignedHoursBare(data.cumRemain)}
             </span>
             <span className="text-sm text-muted-foreground">H</span>
           </div>
-          <StatusPill
-            ok={ok}
-            okLabel={`${arrow}距计划 ${formatSignedHoursBare(data.cumRemain)} H`}
-          />
+          <StatusPill ok={verdict.ok} label={verdict.label} />
         </VerdictCardBody>
       );
     }
