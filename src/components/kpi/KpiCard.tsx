@@ -11,12 +11,13 @@
  * no progress bars: two of the four were pinned at 100% and encoded nothing, and
  * the other two duplicated a percentage the caption already states in words.
  * The three remaining-hours cards share one threshold (isRemainOnTrack):
- * remainder >= 0 renders a green 😊 pill (exactly 0 is landing on target),
- * < 0 renders a red 😞 pill. Each verdict card shows the face twice: a large
- * decorative face at the right edge as the at-a-glance verdict, and the small
- * face inside the pill beneath the figure. Both are aria-hidden because the
- * pill text already carries the verdict for screen readers. Status pills keep
- * the brand CSS-variable utilities (bg-challenge / bg-actual) registered in
+ * remainder >= 0 renders a green 😊 verdict (exactly 0 is landing on target),
+ * < 0 renders a red 😞 verdict. Each verdict card carries exactly one face:
+ * a large decorative emoji at the right edge as the at-a-glance cue. The pill
+ * beneath the figure is colored wording only, no emoji (user decision
+ * 2026-09-09: one face per card). The emoji is aria-hidden because the pill
+ * text already carries the verdict for screen readers. Status pills keep the
+ * brand CSS-variable utilities (bg-challenge / bg-actual) registered in
  * globals.css; no hardcoded hex values.
  */
 import * as React from "react";
@@ -50,10 +51,13 @@ function formatSigned(n: number): string {
   return rounded > 0 ? `+${rounded}` : `${rounded}`;
 }
 
-/** Compact status pill with a verdict face: green 😊 when `ok`, red 😞 otherwise.
+/** Compact text-only status pill: green wording when `ok`, red otherwise.
  *  Uses brand colors with 20% opacity backgrounds via Tailwind 4 opacity
- *  modifiers. `ngLabel` defaults to `okLabel` for cards whose text only varies
- *  by the leading ▲/▼ arrow, which is already derived from the same value. */
+ *  modifiers. The verdict face lives only in the large decorative emoji of
+ *  VerdictCardBody - the pill itself deliberately carries no emoji (user
+ *  decision 2026-09-09: one face per card). `ngLabel` defaults to `okLabel`
+ *  for cards whose text only varies by the leading ▲/▼ arrow, which is
+ *  already derived from the same value. */
 function StatusPill({
   ok,
   okLabel,
@@ -66,13 +70,10 @@ function StatusPill({
   return (
     <span
       className={cn(
-        "inline-flex w-fit items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
+        "inline-flex w-fit items-center rounded-full px-2 py-0.5 text-xs font-medium",
         ok ? "bg-challenge/20 text-challenge" : "bg-actual/20 text-actual",
       )}
     >
-      <span aria-hidden="true" className="select-none">
-        {ok ? "😊" : "😞"}
-      </span>
       {ok ? okLabel : ngLabel}
     </span>
   );
