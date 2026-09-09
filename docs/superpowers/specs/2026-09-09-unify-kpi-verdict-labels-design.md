@@ -31,7 +31,7 @@
 ### 非目标（明确不做）
 
 - 不改判定边界：`isRemainOnTrack` 的 `>= 0`、恰好 0 = 达成，均不变。
-- 不改下方达成状况表的「达成 / **未达成**」文案及其严格 `> 0` 边界（两处边界规则不同，词面差异刻意保留，见 §6.3）。
+- 不改下方达成状况表的「达成 / **未达成**」文案及其严格 `> 0` 边界（两处边界规则不同，词面差异刻意保留，见 §5.5）。
 - 不动 emoji（😊/😞、`text-5xl`、aria-hidden）、绿/红品牌色底、大号数字、卡标题、四卡布局。
 - 不做 D-243、不做 390px 移动端适配、不做任何顺手重构。
 - 无迁移、无新依赖（明确不引入 jsdom）、无 env / schema 变更。
@@ -161,7 +161,7 @@ import 调整：`@/lib/calc` 的 `isRemainOnTrack` 在 KpiCard 中不再直接�
 - `calc.ts:193-204` 的 `isRemainOnTrack` JSDoc **不动**（其中"mislabelled ... as 超支"是历史 bug 叙述，保留原样才不失真）。
 - `tests/calc/remain-on-track.test.ts` 注释中作为历史叙述出现的「超支」**不动**。
 
-### 6.5 达成状况表刻意不动
+### 5.5 达成状况表刻意不动
 
 `src/components/chart/AchievementTable.tsx:89` 维持 `{cell.achieved ? '达成' : '未达成'}`，其 `makeCell`（calc.ts:70-73）维持严格 `diff > 0`。KPI 卡（`>= 0`，词「不达成」）与达成表（`> 0`，词「未达成」）的差异是 calc.ts:64-68 注释锁定的 2026-09-09 product decision；词面不同恰好提示两处边界规则不同。本次**不得**顺手统一。
 
