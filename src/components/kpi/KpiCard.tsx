@@ -81,10 +81,14 @@ function StatusPill({
 
 /**
  * Body layout shared by the three verdict cards: the figure and its pill on
- * the left, one oversized verdict face on the right as the card's dominant
- * visual cue (user-requested 2026-09-09). The large face is purely decorative
- * - the pill text below the figure is the accessible verdict - hence
- * aria-hidden. The actual-hours card has no verdict and does not use this.
+ * the left, one verdict face on the right as the at-a-glance status cue
+ * (user-requested 2026-09-09). Sized text-5xl (48px, 1.6x the 30px figure)
+ * after a design review: at the original text-7xl (72px, 2.4x the figure) the
+ * decorative face out-weighed the KPI number itself, which clashes with the
+ * calm data-dense App UI register of the rest of the dashboard. The face is
+ * purely decorative - the pill text below the figure is the accessible
+ * verdict - hence aria-hidden. The actual-hours card has no verdict and does
+ * not use this.
  */
 function VerdictCardBody({
   ok,
@@ -96,7 +100,7 @@ function VerdictCardBody({
   return (
     <div className="flex items-center justify-between gap-3">
       <div className="flex min-w-0 flex-col gap-2">{children}</div>
-      <span aria-hidden="true" className="select-none text-7xl leading-none">
+      <span aria-hidden="true" className="select-none text-5xl leading-none">
         {ok ? "😊" : "😞"}
       </span>
     </div>
