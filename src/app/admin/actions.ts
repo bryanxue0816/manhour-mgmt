@@ -47,6 +47,7 @@ import { revalidatePath } from "next/cache";
 
 import { Prisma } from "@/generated/prisma/client";
 import { requireAdmin } from "@/lib/auth";
+import { isLikelyEmailAddress } from "@/lib/validation/email";
 import { createJobTitleRule, upsertJobTitleRule } from "@/lib/db/job-title-rule.repo";
 import {
   SectionRenameError,
@@ -178,8 +179,6 @@ function parseOptionalText(
  * of sending to it. This catches the realistic typo class: a name with no domain, a
  * missing @, a trailing comma from a pasted list.
  */
-const EMAIL_SHAPE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
-
 function parseOptionalEmail(
   raw: unknown,
   maxLength: number,
@@ -188,7 +187,7 @@ function parseOptionalEmail(
   if ("error" in text || text.value === null) {
     return text;
   }
-  if (!EMAIL_SHAPE.test(text.value)) {
+  if (!isLikelyEmailAddress(text.value)) {
     return { error: "邮箱格式不合法,应形如 name@example.com。" };
   }
   return text;
