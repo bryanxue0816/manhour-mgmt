@@ -33,6 +33,12 @@
    - **勘误 I（执行期发现：spec §7.1 it.each 数据笔误，已修进计划测试，实现块不动）**：Task 5 测试的 it.each 表（spec §7.1 与计划原稿同为 `["stale","stale"]`、`["never","stale"]`，state() factory 默认 `lastAlertDate: null`）断言 lastState="stale" 返回 send-first，但 spec §5.1.4 矩阵对 stale+stale 只规定「同日 skip / 否则 send-repeat」两行，且任何 stale 历史都由 intentStateFor 落盘 lastAlertDate（stale+null 日期为状态机不可达态），矩阵无对应行；而该用例标题逐字为 "sends the first alert on %s **after the baseline scan**"，精确对应矩阵行「stale 或 never | baseline → send-first（宽限仅一个扫描点）」——第二列两行恒为 "stale" 使参数化退化，且该矩阵行在原测试中零覆盖；never+ok/stale 的防御行为另有专门命名用例（"defensively treats never-after-ok as a first alert"）。**裁决：测试数据第二列改为 `"baseline"`（`["stale","baseline"]`、`["never","baseline"]`），Step 3 实现块逐字不动**（既有 `state.lastState === "baseline" || state.lastState === "ok"` 分支即返回 send-first）。与勘误 E 同原则：冻结测试自身矛盾时以行为契约（矩阵 + 用例标题）为准，不弱化测试也不为不可达态新增生产分支。
    - **勘误 J（Task 5 spec 评审发现：§5.1.4 防御条款散文与矩阵冲突，以矩阵为准，代码/测试均不动）**：spec :288 字面写「never + ok/**stale** 一律按 send-first 处理」，但矩阵 :283 正式规定 never+baseline → send-first（tracked="stale"），此后 lastState:"stale" 即由持续 never 的扫描写出——**never+stale 实为冷启动宽限后的可达常态**（首扫 never+null→baseline；次扫 never+baseline→send-first 写 tracked:"stle"；同日再扫走 :285 skip，次日走 :286 send-repeat）。若按 :288 字面让 never+stale 永远 send-first，:285-286 的自然日频控对该状态全部失效。:288 括号「不可达」推理只对 ok 成立（ok 历史必有成功导入记录），对 stale 不成立。**裁决：决策以矩阵 11 行为准**；Task 5 实现块（分支只特判 ok/baseline → send-first，stale 历史统走尾支频控）与勘误 I 后的 13 例测试均为最终版，逐字不动；:288 中「/stale」措辞视为 spec 散文笔误，记录在案。
    - **勘误 K（Task 6 质量评审发现、协调者核查后关闭：模板 corrupt-timestamp 入参在本链路不可达，非代码变更）**：评审指出 `describeImportStaleness` 对损坏时间戳返回 `{level:"stale",daysSince:null}`（import-staleness.ts:78-86），若喂入 `buildStaleAlertEmail` 会渲染「已 null 天」且 `formatBusinessTimestamp(Invalid Date)` 抛 RangeError；入参类型也接受 `level:"ok"`。**核查结论：告警链路不可达**——① Task 10 薄壳的 `findLatestSuccessAt` 取自 `findLatestSuccessfulImportLog().importedAt`（repo:178-184 → `toImportLogDto`，repo:51-68 入参声明 `importedAt: Date` 且原样透传，无 `new Date(字符串)`），源头是 Prisma 非空列 `importedAt DateTime @default(now())`（schema:456/500），client 只产出合法 Date 或 null；Invalid Date 仅在绕过应用层手工损坏 SQLite 时出现，那会同时破坏现有 actuals 页同源 staleness 横幅（actuals/page.tsx:651），非本功能引入。② `buildMail` 仅在发送决策被调，矩阵中 level:"ok" 只产出 skip/send-recovery，故 `buildStaleAlertEmail` 收不到 ok。③ 万一发生，RangeError 冒泡出 service 被薄壳 `.catch` 记为 `scan-fatal` exit 2（fail-loud，非静默）。**处置：Task 6 接口/测试与 Task 9 冻结代码逐字不动**；不采纳「判别联合」改法（会改 spec §5.1.5 契约与 8 例测试、漂移计数锚点，且 corrupt 态在 §5.4 无邮件文案版式，属产品决策）。遗留项记 backlog：若未来 repo 改为解析外部字符串时间戳，须在 `buildMail` 前对 corrupt stale 加护栏（建议按 never 版式或专用 corrupt 文案，需产品定文案）。另：评审 Minor（模板补 `@pre` 不变量注释、never subject 负向断言、recovery body 断言）一并记 backlog，本期不做。
+   - **勘误 L（Task 8 安全评审发现、协调者处置：脱敏纵深防御 backlog，冻结代码不动）**：`sanitizeSmtpError` 现正则 `/(pass(?:word)?|auth)\s*[=:]\s*\S+/gi`（先替换后 300 字截断，截断顺序经实测安全）经对抗实测确认四类缺口：① URL userinfo（`smtp://user:pass@host`）漏网；② 无 `=`/`:` 分隔的自由文本不替换（JSDoc 示例 "pass hunter2" 即此类，注释过度承诺）；③ 恶意/异常 SMTP 服务器在 535 响应里回显 AUTH PLAIN base64 blob 可被还原；④ 口令含空格只脱后缀。**威胁模型裁决：均非跨信任边界**——SMTP 端点在 AUTH 阶段本就持有明文口令（配置即信任），error 的阅读者是配置 SMTP_PASS 的同一批管理员，真实企业中继不回显凭据；且冻结实现已比 spec §5.1.6 散文正则 `(pass|password|auth)=?\S+` 更严格（强制分隔符避免误伤普通词）。**处置：Task 8 文件 byte-identical 不动**；walking skeleton 不引入计划外安全重构。第二期硬化 backlog（按性价比排序）：a) 对 nodemailer `EAUTH` 等已知错误码映射固定中文文案、不带出服务器原文（一次性消灭整个回显类，首选）；b) 增补 URL userinfo 正则与 `passwd/passphrase/secret/token` 变体；c) sanitizer 体包 try/catch，对外来 toString 抛错对象回退固定串；d) 修正 JSDoc 示例为 `pass=hunter2` 形态并软化「never contains」措辞；e) 为 sanitizeSmtpError 补单测（脱敏矩阵/300 截断/外来对象）；f) 评估 email-config 层在 `secure:false`+25 端口机会性 STARTTLS 下的 `requireTLS` 策略，防降级中继明文 AUTH。同批 Minor：dry-run 路径无 try（仅理论）、`pass ?? ""` 为事实死分支（email-config 强制 user/pass 同空同填）。
+   - **勘误 M（Task 9 执行期发现：spec §7.6 测试块四处缺陷，只改测试、实现块逐字不动、不弱化断言）**：spec §7.6（spec:1300-1460）与计划原稿逐字相同的测试代码因写在 markdown 从未编译，Task 9 实跑暴露 2 例运行时失败 + typecheck 2 错 + lint 1 warning；实现文件零类型错误、行为由通过用例证明。四处修法（均已内嵌本任务 Step 3 测试块）：
+     - **A（运行时）dry-run 同日双扫只记 1 条投递日志**：harness 的 `const result = queue.shift() ?? liveOk;` 在队列耗尽后回退到硬编码 `liveOk`（dryRun:false），第二遍 dry-run 不打日志。改为 `queue.shift() ?? defaultResult`——`defaultResult` 本就按 `config.mode` 算成 dry/live，硬编码 liveOk 是笔误。对其余用例零影响（live 配置 defaultResult===liveOk；失败用例只消费显式队列首项）。
+     - **B（运行时+TS2339）cutover 用例读错对象**：`live.sent[0]?.dryRun` 中 `sent` 是 `SendEmailInput[]`（仅 to/subject/text，无 dryRun），dryRun 在 `SendEmailResult` 上。修法：harness 增加 `results: SendEmailResult[]`，每次 send push 返回值并经 Harness 暴露；断言改 `expect(live.results[0]?.dryRun).toBe(false)`，「cutover 是真实发送」的证明不弱化。
+     - **C（TS2339 never）intent 先落盘用例的闭包变量窄化**：`let stateAtSend: AlertState | null = null` 仅在替换 send 的 async 闭包内赋值，TS 5.9 CFA 在 await 后读取点窄化为 never。改为可变持有对象 `const observed: { stateAtSend: AlertState | null } = { stateAtSend: null }`，闭包内写 `observed.stateAtSend = h.store()`，断言读 `observed.stateAtSend?.lastAlertDate`（对象属性跨闭包不被窄化），顺序契约证明完整保留。
+     - **D（lint no-unused-vars）dry-run 双扫的 `second` 未使用**：不删第二次调用（它是「同日双扫、两封都发」语义所需），改为 `expect(second).toMatchObject({ decision: "send-first", exitCode: 0 });`（dry-run 不建状态，prev 恒 null，第二遍 decision 仍 send-first），断言强化。
 
 ---
 
@@ -1628,6 +1634,7 @@ interface HarnessOptions {
 interface Harness {
   deps: AlertCheckDeps;
   sent: SendEmailInput[];
+  results: SendEmailResult[];
   logs: Record<string, unknown>[];
   store: () => AlertState | null;
   advanceOneDay: () => void;
@@ -1637,6 +1644,7 @@ function harness(options: HarnessOptions): Harness {
   let state: AlertState | null = options.initial ?? null;
   let clock: Date = NOW;
   const sent: SendEmailInput[] = [];
+  const results: SendEmailResult[] = [];
   const logs: Record<string, unknown>[] = [];
   const defaultResult: SendEmailResult =
     options.config?.mode === "dry-run"
@@ -1660,7 +1668,10 @@ function harness(options: HarnessOptions): Harness {
     },
     send: async (input) => {
       sent.push(input);
-      const result = queue.shift() ?? liveOk;
+      // Erratum M-A: fall back to defaultResult (dry/live per config), never a
+      // hardcoded liveOk that would mislabel a second dry-run delivery.
+      const result = queue.shift() ?? defaultResult;
+      results.push(result);
       if (result.dryRun) logs.push({ evt: "alert-email-dry-run" });
       return result;
     },
@@ -1670,6 +1681,7 @@ function harness(options: HarnessOptions): Harness {
   return {
     deps,
     sent,
+    results,
     logs,
     store: () => state,
     advanceOneDay: () => {
@@ -1681,10 +1693,12 @@ function harness(options: HarnessOptions): Harness {
 describe("runAttendanceAlertCheck", () => {
   it("persists the send intent BEFORE the first live alert goes out", async () => {
     const h = harness({ latest: STALE_SUCCESS });
-    let stateAtSend: AlertState | null = null;
+    // Erratum M-C: hold the observed state in an object; a let-bound value
+    // assigned only inside this closure is narrowed to never by TS at the read.
+    const observed: { stateAtSend: AlertState | null } = { stateAtSend: null };
     const originalSend = h.deps.send;
     h.deps.send = async (input) => {
-      stateAtSend = h.store(); // Observed from inside the sender: ordering is the contract.
+      observed.stateAtSend = h.store(); // Observed from inside the sender: ordering is the contract.
       return originalSend(input);
     };
 
@@ -1692,7 +1706,7 @@ describe("runAttendanceAlertCheck", () => {
 
     expect(result).toMatchObject({ decision: "send-first", exitCode: 0 });
     expect(h.sent).toHaveLength(1);
-    expect(stateAtSend?.lastAlertDate).toBe("2026-09-11");
+    expect(observed.stateAtSend?.lastAlertDate).toBe("2026-09-11");
     expect(h.store()?.lastSentAt).not.toBeNull();
   });
 
@@ -1780,6 +1794,9 @@ describe("runAttendanceAlertCheck", () => {
     const second = await runAttendanceAlertCheck(h.deps);
 
     expect(first).toMatchObject({ decision: "send-first", exitCode: 0 });
+    // Erratum M-D: dry-run writes no state, so prev stays null and the second
+    // scan decides send-first again instead of being suppressed same-day.
+    expect(second).toMatchObject({ decision: "send-first", exitCode: 0 });
     expect(h.sent).toHaveLength(2);
     expect(h.logs.filter((l) => l.evt === "alert-email-dry-run")).toHaveLength(2);
     expect(h.store()).toBeNull(); // No file created: dry-run never persists send cadence.
@@ -1793,7 +1810,8 @@ describe("runAttendanceAlertCheck", () => {
     const result = await runAttendanceAlertCheck(live.deps);
 
     expect(result.decision).toBe("send-first");
-    expect(live.sent[0]?.dryRun).toBe(false);
+    // Erratum M-B: dryRun lives on SendEmailResult, not the SendEmailInput in sent[].
+    expect(live.results[0]?.dryRun).toBe(false);
   });
 
   it("records a live send failure and does not retry within the same day", async () => {
