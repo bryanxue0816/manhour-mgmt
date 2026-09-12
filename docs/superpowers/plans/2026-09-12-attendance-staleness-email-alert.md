@@ -30,6 +30,8 @@
    - **勘误 F（spec §7.2 import 漏项）**：测试体调用了 `touchedState` 但 import 清单漏列。Task 4 的测试代码已补上，无需用户决策。
    - **勘误 G（执行期发现：Windows 基址污染绝对 URL，已修进计划代码）**：`alertStatePathFor` 计划原稿对所有 `file:` URL 一律 `new URL(raw, base)`，而 win32 基址带盘符，WHATWG 解析把 `file:/app/data/dev.db` 污染成 `/D:/app/...`，与同段注释承诺的「POSIX 绝对路径字符串切片」不符。修法已内嵌 Task 4 实现块：绝对 spec（`file:/`、`file:///`）用无基址 `new URL(raw)`，相对 spec（`file:./x`）才用基址解析；四分支已在 Windows 实测通过。Linux 行为不变。
    - **勘误 H（执行期发现：测试多余 import）**：Task 4 测试计划原稿 import 了未使用的 `readFile`，会给仓库新增 1 条 lint warning（基线为 0）。Task 4 测试块的 import 行已改为 `import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";`。
+   - **勘误 I（执行期发现：spec §7.1 it.each 数据笔误，已修进计划测试，实现块不动）**：Task 5 测试的 it.each 表（spec §7.1 与计划原稿同为 `["stale","stale"]`、`["never","stale"]`，state() factory 默认 `lastAlertDate: null`）断言 lastState="stale" 返回 send-first，但 spec §5.1.4 矩阵对 stale+stale 只规定「同日 skip / 否则 send-repeat」两行，且任何 stale 历史都由 intentStateFor 落盘 lastAlertDate（stale+null 日期为状态机不可达态），矩阵无对应行；而该用例标题逐字为 "sends the first alert on %s **after the baseline scan**"，精确对应矩阵行「stale 或 never | baseline → send-first（宽限仅一个扫描点）」——第二列两行恒为 "stale" 使参数化退化，且该矩阵行在原测试中零覆盖；never+ok/stale 的防御行为另有专门命名用例（"defensively treats never-after-ok as a first alert"）。**裁决：测试数据第二列改为 `"baseline"`（`["stale","baseline"]`、`["never","baseline"]`），Step 3 实现块逐字不动**（既有 `state.lastState === "baseline" || state.lastState === "ok"` 分支即返回 send-first）。与勘误 E 同原则：冻结测试自身矛盾时以行为契约（矩阵 + 用例标题）为准，不弱化测试也不为不可达态新增生产分支。
+   - **勘误 J（Task 5 spec 评审发现：§5.1.4 防御条款散文与矩阵冲突，以矩阵为准，代码/测试均不动）**：spec :288 字面写「never + ok/**stale** 一律按 send-first 处理」，但矩阵 :283 正式规定 never+baseline → send-first（tracked="stale"），此后 lastState:"stale" 即由持续 never 的扫描写出——**never+stale 实为冷启动宽限后的可达常态**（首扫 never+null→baseline；次扫 never+baseline→send-first 写 tracked:"stle"；同日再扫走 :285 skip，次日走 :286 send-repeat）。若按 :288 字面让 never+stale 永远 send-first，:285-286 的自然日频控对该状态全部失效。:288 括号「不可达」推理只对 ok 成立（ok 历史必有成功导入记录），对 stale 不成立。**裁决：决策以矩阵 11 行为准**；Task 5 实现块（分支只特判 ok/baseline → send-first，stale 历史统走尾支频控）与勘误 I 后的 13 例测试均为最终版，逐字不动；:288 中「/stale」措辞视为 spec 散文笔误，记录在案。
 
 ---
 
@@ -940,7 +942,7 @@ Expected: 零错误。勘误 E 已经用户 2026-09-12 裁决（按行为契约�
 - Create: `src/lib/alerts/alert-decision.ts`
 - Test: `tests/alerts/alert-decision.test.ts`
 
-- [ ] **Step 1: 写失败测试（逐字，spec §7.1）**
+- [ ] **Step 1: 写失败测试（spec §7.1；it.each 第二列按勘误 I 修正为 "baseline"）**
 
 创建 `tests/alerts/alert-decision.test.ts`：
 
@@ -984,9 +986,13 @@ describe("decideAlertAction", () => {
     expect(decision).toEqual({ kind: "baseline", tracked: "baseline" });
   });
 
+  // Erratum I (2026-09-12): spec §7.1 wrote the second column as "stale" in
+  // both rows, but the title ("after the baseline scan") and matrix §5.1.4
+  // ("stale or never | baseline -> send-first") call for "baseline"; the
+  // stale+null-date combination is unreachable in the state machine.
   it.each([
-    ["stale", "stale"],
-    ["never", "stale"],
+    ["stale", "baseline"],
+    ["never", "baseline"],
   ] as const)(
     "sends the first alert on %s after the baseline scan",
     (level, lastState) => {
