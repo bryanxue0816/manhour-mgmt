@@ -41,6 +41,7 @@
      - **D（lint no-unused-vars）dry-run 双扫的 `second` 未使用**：不删第二次调用（它是「同日双扫、两封都发」语义所需），改为 `expect(second).toMatchObject({ decision: "send-first", exitCode: 0 });`（dry-run 不建状态，prev 恒 null，第二遍 decision 仍 send-first），断言强化。
    - **勘误 N（Task 10 执行期发现：冻结薄壳块首次编译报 TS2345，只改本任务薄壳装配点、不动 Task 8 冻结文件）**：Task 10 Step 1 逐字块中 `const sender = createEmailSender(config);` 的 `config` 是完整 `AlertEmailConfig` 联合（live/dry-run/config-error），而 Task 8 冻结的 `createEmailSender(config: LiveEmailConfig | DryRunEmailConfig)` 形参不含 config-error 成员 → `scripts/check-attendance-alert.ts(57,36): TS2345`。运行时无害（service 在 config-error 时于任何 send 之前短路），但 markdown 代码块从未经 tsc，抄写即暴露。**裁决：Task 8 文件 byte-identical 不动**——其签名「只为可发送配置造 sender」建模正确；修法放在 Task 10 薄壳装配点窄化（已内嵌本计划 Task 10 Step 1 代码块）：config-error 时注入一个 dry-run stand-in，该 sender 在 config-error 扫描中永不被调用；选 dry-run 而非 live 是 fail-safe——即使未来有人改动 service 的 gate 顺序，stand-in 也绝不真实投递。另（非计划缺陷，记录实测）：Step 5 的 `errors=3` 实测为 **`errors=2`**——`SMTP_FROM=bad-value` 仅查非空（通过）、SMTP_USER/PASS 同缺配对留空（通过）、SMTP_PORT 缺省 25、SMTP_SECURE 缺省不报错，仅「收件人 0 个」+「含非法形态」两条中文错误；计划已写「以实际文案为准，至少 ≥1」，不改文案。环境说明：本地 dev.db 曾落后 3 个仓库自有迁移（纯加性 ADD COLUMN/CREATE TABLE，无数据改动），协调者备份后 `prisma migrate deploy` 修复，非代码缺陷。
    - **勘误 O（Task 12 执行期发现：冻结接线块类型不连通，只改主页接线、Task 11 冻结文件不动）**：Task 12 原稿改动 A 只 `import { loadAlertBadgeData }`、改动 B 第五项直接 `loadAlertBadgeData().catch(() => null)`，但 Task 11 冻结的 `loadAlertBadgeData()` 返回**原始数据** `Promise<{ config: AlertEmailConfig; staleness: ImportStaleness } | null>`，而组件 `AlertStatusBadge` 要的是 `AlertBadgeView { tone, label, href }`——逐字接线 typecheck 必失败（缺 tone/label/href）。根因：markdown 接线块从未编译，漏了 build 步骤。**裁决：Task 11 文件 byte-identical 不动**（loader 返原始数据、由装配层 build 本就是与 Task 13 `loadAlertsPageData()` 后在 page 内 `buildAlertsPageView(...)` 一致的哲学；改 loader 返 view 会破坏两 loader 对称与命名）。修法落在主页接线（已内嵌 Task 12 Step 2/3 块）：改动 A 第二行加符号 `import { buildAlertBadge, loadAlertBadgeData } from "./alerts/alerts-summary";`；改动 B 第五项在 `.catch` 前加 `.then((data) => (data === null ? null : buildAlertBadge(data)))`，使解构出的 `alertBadge: AlertBadgeView | null`，改动 C 的 JSX 与组件文件保持零偏差。并行性保留（仍在同一个 Promise.all），fail-soft 保留（loader 返 null → then 透传 null；build 理论抛错被既有 `.catch(() => null)` 兜成不渲染角标，主页绝不垮）。
+   - **勘误 P（Task 13 执行期发现：冻结 action 块的鉴权是裸 await，安全边界不存在，只改本任务 actions.ts 装配点、不动 src/lib/auth.ts）**：Task 13 Step 1 逐字块中 `sendTestAlertEmailAction` 首行写的是裸 `await requireAdmin();`，返回值被丢弃。但 `requireAdmin()` 的契约是**返回判别联合** `{ ok: true, session } | { ok: false, message }` 而非 throw/redirect（src/lib/auth.ts JSDoc 明示「Returns rather than throws」，示例即 `const gate = await requireAdmin(); if (!gate.ok) return reject(gate.message);`；src/lib/auth-page.ts 进一步明示 Server Action 可被直连 POST 绕过路由，load-bearing 的只有 action 体内的检查，2026-08-17 实测）。全仓既有十个写 action 无一例外分支检查 `gate.ok`；markdown 块从未编译，tsc/eslint 均无法捕获「丢弃了判别联合」。裸 await 下，匿名直连 POST 会继续走到 `senderFor(config).send(...)`——live 模式下即未授权触发一次真实外发（收件人限配置的管理员自身，故不是对外滥发，而是可被未认证者反复触发的 SMTP 中继/骚扰面，且违背文件头注释自述的边界承诺）。**裁决：src/lib/auth.ts byte-identical 不动**（returns-not-throws 是全仓十个 action 依赖的既有建模）；修法落在 Task 13 actions.ts（已内嵌 Step 1 块）：首行改 `const gate = await requireAdmin();`，紧接 `if (!gate.ok) { redirect(\`/login?from=${encodeURIComponent("/admin/alerts")}\`); }`。为何不用既有 action 的 `return reject(...)`：那些 action 由客户端 useActionState 消费 `AdminActionResult`，而本 action 是无参原生 `<form action>`、无客户端消费返回值，且四个正常出口全部已是 `redirect()`（Next 16 文档：Server Action 中 redirect 抛 NEXT_REDIRECT，无 JS 表单走 303），故未认证走同一重定向控制流最贴合本形态，且登录后经 login action 的 `safeDestination` 白名单回到 /admin/alerts（from 为固定站点相对路径，无开放重定向）。gate 仍是函数第一语句，「check before any config read / transport touch」意图完整保留。
 
 ---
 
@@ -2766,7 +2767,19 @@ function senderFor(config: LiveEmailConfig | DryRunEmailConfig): EmailSender {
 }
 
 export async function sendTestAlertEmailAction(): Promise<void> {
-  await requireAdmin();
+  // Erratum P: requireAdmin() RETURNS the verdict, it never throws (see
+  // src/lib/auth.ts). A bare `await requireAdmin();` would compile but enforce
+  // nothing: a direct unauthenticated POST falls through to the real send.
+  // Branch on gate.ok like every other admin action. The ten existing actions
+  // `return reject(gate.message)` for a client useActionState consumer; this is
+  // a no-argument native <form action> with no return-value consumer and four
+  // redirect() exits already, so the denied branch redirects to the login form
+  // (the `from` target is a fixed site-relative path validated again by the
+  // login action's safeDestination - no open redirect).
+  const gate = await requireAdmin();
+  if (!gate.ok) {
+    redirect(`/login?from=${encodeURIComponent("/admin/alerts")}`);
+  }
 
   const config = loadAlertEmailConfig(process.env);
   if (config.mode === "config-error") {
