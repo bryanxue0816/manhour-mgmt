@@ -40,6 +40,7 @@
      - **C（TS2339 never）intent 先落盘用例的闭包变量窄化**：`let stateAtSend: AlertState | null = null` 仅在替换 send 的 async 闭包内赋值，TS 5.9 CFA 在 await 后读取点窄化为 never。改为可变持有对象 `const observed: { stateAtSend: AlertState | null } = { stateAtSend: null }`，闭包内写 `observed.stateAtSend = h.store()`，断言读 `observed.stateAtSend?.lastAlertDate`（对象属性跨闭包不被窄化），顺序契约证明完整保留。
      - **D（lint no-unused-vars）dry-run 双扫的 `second` 未使用**：不删第二次调用（它是「同日双扫、两封都发」语义所需），改为 `expect(second).toMatchObject({ decision: "send-first", exitCode: 0 });`（dry-run 不建状态，prev 恒 null，第二遍 decision 仍 send-first），断言强化。
    - **勘误 N（Task 10 执行期发现：冻结薄壳块首次编译报 TS2345，只改本任务薄壳装配点、不动 Task 8 冻结文件）**：Task 10 Step 1 逐字块中 `const sender = createEmailSender(config);` 的 `config` 是完整 `AlertEmailConfig` 联合（live/dry-run/config-error），而 Task 8 冻结的 `createEmailSender(config: LiveEmailConfig | DryRunEmailConfig)` 形参不含 config-error 成员 → `scripts/check-attendance-alert.ts(57,36): TS2345`。运行时无害（service 在 config-error 时于任何 send 之前短路），但 markdown 代码块从未经 tsc，抄写即暴露。**裁决：Task 8 文件 byte-identical 不动**——其签名「只为可发送配置造 sender」建模正确；修法放在 Task 10 薄壳装配点窄化（已内嵌本计划 Task 10 Step 1 代码块）：config-error 时注入一个 dry-run stand-in，该 sender 在 config-error 扫描中永不被调用；选 dry-run 而非 live 是 fail-safe——即使未来有人改动 service 的 gate 顺序，stand-in 也绝不真实投递。另（非计划缺陷，记录实测）：Step 5 的 `errors=3` 实测为 **`errors=2`**——`SMTP_FROM=bad-value` 仅查非空（通过）、SMTP_USER/PASS 同缺配对留空（通过）、SMTP_PORT 缺省 25、SMTP_SECURE 缺省不报错，仅「收件人 0 个」+「含非法形态」两条中文错误；计划已写「以实际文案为准，至少 ≥1」，不改文案。环境说明：本地 dev.db 曾落后 3 个仓库自有迁移（纯加性 ADD COLUMN/CREATE TABLE，无数据改动），协调者备份后 `prisma migrate deploy` 修复，非代码缺陷。
+   - **勘误 O（Task 12 执行期发现：冻结接线块类型不连通，只改主页接线、Task 11 冻结文件不动）**：Task 12 原稿改动 A 只 `import { loadAlertBadgeData }`、改动 B 第五项直接 `loadAlertBadgeData().catch(() => null)`，但 Task 11 冻结的 `loadAlertBadgeData()` 返回**原始数据** `Promise<{ config: AlertEmailConfig; staleness: ImportStaleness } | null>`，而组件 `AlertStatusBadge` 要的是 `AlertBadgeView { tone, label, href }`——逐字接线 typecheck 必失败（缺 tone/label/href）。根因：markdown 接线块从未编译，漏了 build 步骤。**裁决：Task 11 文件 byte-identical 不动**（loader 返原始数据、由装配层 build 本就是与 Task 13 `loadAlertsPageData()` 后在 page 内 `buildAlertsPageView(...)` 一致的哲学；改 loader 返 view 会破坏两 loader 对称与命名）。修法落在主页接线（已内嵌 Task 12 Step 2/3 块）：改动 A 第二行加符号 `import { buildAlertBadge, loadAlertBadgeData } from "./alerts/alerts-summary";`；改动 B 第五项在 `.catch` 前加 `.then((data) => (data === null ? null : buildAlertBadge(data)))`，使解构出的 `alertBadge: AlertBadgeView | null`，改动 C 的 JSX 与组件文件保持零偏差。并行性保留（仍在同一个 Promise.all），fail-soft 保留（loader 返 null → then 透传 null；build 理论抛错被既有 `.catch(() => null)` 兜成不渲染角标，主页绝不垮）。
 
 ---
 
@@ -2655,7 +2656,7 @@ export function AlertStatusBadge({ view }: { view: AlertBadgeView }): ReactEleme
 
 ```ts
 import { AlertStatusBadge } from "./_components/AlertStatusBadge";
-import { loadAlertBadgeData } from "./alerts/alerts-summary";
+import { buildAlertBadge, loadAlertBadgeData } from "./alerts/alerts-summary";
 import { KvTable, type KvColumn } from "./_components/KvTable";
 import { JobTitleRuleEditor } from "./_components/JobTitleRuleEditor";
 import { OrgEditor } from "./_components/OrgEditor";
@@ -2672,8 +2673,13 @@ import { OrgEditor } from "./_components/OrgEditor";
     findAllJobTitleRules(),
     getAllConfig(),
     // Read-only and self-swallowing: the admin home must render even when the
-    // alert subsystem's database read is unavailable.
-    loadAlertBadgeData().catch(() => null),
+    // alert subsystem's database read is unavailable. The loader returns raw
+    // {config, staleness}; buildAlertBadge turns it into the badge view model
+    // (Erratum O - wiring the raw loader result straight into the badge fails
+    // typecheck, since AlertBadgeView adds tone/label/href).
+    loadAlertBadgeData()
+      .then((data) => (data === null ? null : buildAlertBadge(data)))
+      .catch(() => null),
   ]);
 ```
 

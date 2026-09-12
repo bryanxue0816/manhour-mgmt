@@ -27,6 +27,8 @@ import { findAllJobTitleRules } from "@/lib/db/job-title-rule.repo";
 import { loadOrgSnapshot } from "@/lib/db/org.repo";
 import { countPlansByFiscalYear } from "@/lib/db/plan.repo";
 import type { FiscalYearDto } from "@/lib/db/types";
+import { AlertStatusBadge } from "./_components/AlertStatusBadge";
+import { buildAlertBadge, loadAlertBadgeData } from "./alerts/alerts-summary";
 import { KvTable, type KvColumn } from "./_components/KvTable";
 import { JobTitleRuleEditor } from "./_components/JobTitleRuleEditor";
 import { OrgEditor } from "./_components/OrgEditor";
@@ -166,11 +168,19 @@ export default async function AdminPage(): Promise<ReactElement> {
   await requireAdminPage("/admin");
 
   // Independent reads - fired together so the page waits on the slowest, not the sum.
-  const [snapshot, fiscalYears, jobTitleRules, config] = await Promise.all([
+  const [snapshot, fiscalYears, jobTitleRules, config, alertBadge] = await Promise.all([
     loadOrgSnapshot(),
     loadFiscalYearRows(),
     findAllJobTitleRules(),
     getAllConfig(),
+    // Read-only and self-swallowing: the admin home must render even when the
+    // alert subsystem's database read is unavailable. The loader returns raw
+    // {config, staleness}; buildAlertBadge turns it into the badge view model
+    // (Erratum O - wiring the raw loader result straight into the badge fails
+    // typecheck, since AlertBadgeView adds tone/label/href).
+    loadAlertBadgeData()
+      .then((data) => (data === null ? null : buildAlertBadge(data)))
+      .catch(() => null),
   ]);
 
   const configRows: readonly ConfigRow[] = Object.entries(config).map(([key, value]) => ({
@@ -205,6 +215,7 @@ export default async function AdminPage(): Promise<ReactElement> {
             但所有管理员共用同一个口令，<span className="font-medium text-warn">无法记录操作者身份</span>
             ——快照只能回答「什么时候被改成了什么样」，不能回答「是谁改的」。
           </p>
+          {alertBadge === null ? null : <AlertStatusBadge view={alertBadge} />}
         </div>
       </header>
 
