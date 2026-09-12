@@ -28,6 +28,8 @@
    - **仲裁 D（runbook 落点）**：spec §6.2 写的 `deploy/DEPLOY-RUNBOOK-*` 在仓库不存在；实际 runbook 是中文 `docs/DEPLOY.md`。考勤告警章作为「第 10 步附」插入该文件第 10 步与第 11 步之间，不重编现有步号。
    - **✅ 勘误 E（spec §7.2 自相矛盾）——用户已于 2026-09-12 裁决：采纳行为契约修正。** `alert-state.test.ts` 末例 spec 原文断言 `touched.lastAlertDate` 为 `null`，但同一用例中 `failed` 继承 send-first intent（`lastAlertDate: "2026-09-11"`），且 spec §5.1.3 要求 touchedState「不动任何频控日期」，两者不可能同时成立。**裁决结论：以行为契约为准**，该断言按 `expect(touched.lastAlertDate).toBe(failed.lastAlertDate)`（即 `"2026-09-11"`）执行；Task 4 内嵌的测试即最终版，无需再改 spec 或退回评审。
    - **勘误 F（spec §7.2 import 漏项）**：测试体调用了 `touchedState` 但 import 清单漏列。Task 4 的测试代码已补上，无需用户决策。
+   - **勘误 G（执行期发现：Windows 基址污染绝对 URL，已修进计划代码）**：`alertStatePathFor` 计划原稿对所有 `file:` URL 一律 `new URL(raw, base)`，而 win32 基址带盘符，WHATWG 解析把 `file:/app/data/dev.db` 污染成 `/D:/app/...`，与同段注释承诺的「POSIX 绝对路径字符串切片」不符。修法已内嵌 Task 4 实现块：绝对 spec（`file:/`、`file:///`）用无基址 `new URL(raw)`，相对 spec（`file:./x`）才用基址解析；四分支已在 Windows 实测通过。Linux 行为不变。
+   - **勘误 H（执行期发现：测试多余 import）**：Task 4 测试计划原稿 import 了未使用的 `readFile`，会给仓库新增 1 条 lint warning（基线为 0）。Task 4 测试块的 import 行已改为 `import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";`。
 
 ---
 
@@ -481,7 +483,7 @@ Expected: 零错误。随后停下报告，等许可后 commit：`feat: add thre
 创建 `tests/alerts/alert-state.test.ts`：
 
 ```ts
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -732,7 +734,14 @@ export function alertStatePathFor(databaseUrl: string | undefined): string {
     return join(dirname(raw), STATE_FILE_NAME);
   }
   const base = pathToFileURL(join(process.cwd(), "state-base"));
-  const url = new URL(raw, base);
+  // Erratum G (2026-09-12, user-approved controller decision during execution):
+  // absolute specs must not be resolved against the cwd base - on win32 that base
+  // carries a drive letter (file:///D:/...) and WHATWG resolution injects it into
+  // file:/app/data/dev.db, producing /D:/app/... which then takes the Windows
+  // branch. Only relative specs (file:./x) resolve against the base.
+  const rest = raw.slice("file:".length);
+  const isRelativeSpec = rest.length > 0 && rest[0] !== "/" && rest[0] !== "\\";
+  const url = isRelativeSpec ? new URL(raw, base) : new URL(raw);
   const pathname = decodeURIComponent(url.pathname);
   const isWindowsDrive = /^\/[A-Za-z]:[\\/]/.test(pathname);
   if (isWindowsDrive) {
