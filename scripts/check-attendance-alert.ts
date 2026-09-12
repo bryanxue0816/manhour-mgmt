@@ -54,7 +54,16 @@ async function main(): Promise<number> {
   printBanner(config);
 
   const stateFile = alertStatePathFor(process.env.DATABASE_URL);
-  const sender = createEmailSender(config);
+  // Erratum N: the loaded config union includes config-error, but
+  // createEmailSender accepts only live/dry-run configs. A config-error scan
+  // short-circuits in the service before any send, so the stand-in sender is
+  // never invoked; dry-run is chosen as fail-safe (it can never deliver even
+  // if the service gate order were ever changed).
+  const sender = createEmailSender(
+    config.mode === "config-error"
+      ? { mode: "dry-run", reason: "smtp-not-configured", adminEmails: [] }
+      : config,
+  );
 
   const result = await runAttendanceAlertCheck({
     now: () => new Date(),
