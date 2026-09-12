@@ -71,7 +71,13 @@ export function alertStatePathFor(databaseUrl: string | undefined): string {
     return join(dirname(raw), STATE_FILE_NAME);
   }
   const base = pathToFileURL(join(process.cwd(), "state-base"));
-  const url = new URL(raw, base);
+  // Erratum G (2026-09-12): absolute specs must not be resolved against the
+  // cwd base - on win32 that base carries a drive letter and WHATWG resolution
+  // injects it into file:/app/data/..., mangling container paths. Only relative
+  // specs (file:./x) resolve against the base.
+  const rest = raw.slice("file:".length);
+  const isRelativeSpec = rest.length > 0 && rest[0] !== "/" && rest[0] !== "\\";
+  const url = isRelativeSpec ? new URL(raw, base) : new URL(raw);
   const pathname = decodeURIComponent(url.pathname);
   const isWindowsDrive = /^\/[A-Za-z]:[\\/]/.test(pathname);
   if (isWindowsDrive) {
