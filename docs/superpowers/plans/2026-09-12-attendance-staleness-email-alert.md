@@ -39,6 +39,7 @@
      - **B（运行时+TS2339）cutover 用例读错对象**：`live.sent[0]?.dryRun` 中 `sent` 是 `SendEmailInput[]`（仅 to/subject/text，无 dryRun），dryRun 在 `SendEmailResult` 上。修法：harness 增加 `results: SendEmailResult[]`，每次 send push 返回值并经 Harness 暴露；断言改 `expect(live.results[0]?.dryRun).toBe(false)`，「cutover 是真实发送」的证明不弱化。
      - **C（TS2339 never）intent 先落盘用例的闭包变量窄化**：`let stateAtSend: AlertState | null = null` 仅在替换 send 的 async 闭包内赋值，TS 5.9 CFA 在 await 后读取点窄化为 never。改为可变持有对象 `const observed: { stateAtSend: AlertState | null } = { stateAtSend: null }`，闭包内写 `observed.stateAtSend = h.store()`，断言读 `observed.stateAtSend?.lastAlertDate`（对象属性跨闭包不被窄化），顺序契约证明完整保留。
      - **D（lint no-unused-vars）dry-run 双扫的 `second` 未使用**：不删第二次调用（它是「同日双扫、两封都发」语义所需），改为 `expect(second).toMatchObject({ decision: "send-first", exitCode: 0 });`（dry-run 不建状态，prev 恒 null，第二遍 decision 仍 send-first），断言强化。
+   - **勘误 N（Task 10 执行期发现：冻结薄壳块首次编译报 TS2345，只改本任务薄壳装配点、不动 Task 8 冻结文件）**：Task 10 Step 1 逐字块中 `const sender = createEmailSender(config);` 的 `config` 是完整 `AlertEmailConfig` 联合（live/dry-run/config-error），而 Task 8 冻结的 `createEmailSender(config: LiveEmailConfig | DryRunEmailConfig)` 形参不含 config-error 成员 → `scripts/check-attendance-alert.ts(57,36): TS2345`。运行时无害（service 在 config-error 时于任何 send 之前短路），但 markdown 代码块从未经 tsc，抄写即暴露。**裁决：Task 8 文件 byte-identical 不动**——其签名「只为可发送配置造 sender」建模正确；修法放在 Task 10 薄壳装配点窄化（已内嵌本计划 Task 10 Step 1 代码块）：config-error 时注入一个 dry-run stand-in，该 sender 在 config-error 扫描中永不被调用；选 dry-run 而非 live 是 fail-safe——即使未来有人改动 service 的 gate 顺序，stand-in 也绝不真实投递。另（非计划缺陷，记录实测）：Step 5 的 `errors=3` 实测为 **`errors=2`**——`SMTP_FROM=bad-value` 仅查非空（通过）、SMTP_USER/PASS 同缺配对留空（通过）、SMTP_PORT 缺省 25、SMTP_SECURE 缺省不报错，仅「收件人 0 个」+「含非法形态」两条中文错误；计划已写「以实际文案为准，至少 ≥1」，不改文案。环境说明：本地 dev.db 曾落后 3 个仓库自有迁移（纯加性 ADD COLUMN/CREATE TABLE，无数据改动），协调者备份后 `prisma migrate deploy` 修复，非代码缺陷。
 
 ---
 
@@ -2235,7 +2236,16 @@ async function main(): Promise<number> {
   printBanner(config);
 
   const stateFile = alertStatePathFor(process.env.DATABASE_URL);
-  const sender = createEmailSender(config);
+  // Erratum N: the loaded config union includes config-error, but
+  // createEmailSender accepts only live/dry-run configs. A config-error scan
+  // short-circuits in the service before any send, so the stand-in sender is
+  // never invoked; dry-run is chosen as fail-safe (it can never deliver even
+  // if the service gate order were ever changed).
+  const sender = createEmailSender(
+    config.mode === "config-error"
+      ? { mode: "dry-run", reason: "smtp-not-configured", adminEmails: [] }
+      : config,
+  );
 
   const result = await runAttendanceAlertCheck({
     now: () => new Date(),
