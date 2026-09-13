@@ -44,6 +44,7 @@
    - **勘误 P（Task 13 执行期发现：冻结 action 块的鉴权是裸 await，安全边界不存在，只改本任务 actions.ts 装配点、不动 src/lib/auth.ts）**：Task 13 Step 1 逐字块中 `sendTestAlertEmailAction` 首行写的是裸 `await requireAdmin();`，返回值被丢弃。但 `requireAdmin()` 的契约是**返回判别联合** `{ ok: true, session } | { ok: false, message }` 而非 throw/redirect（src/lib/auth.ts JSDoc 明示「Returns rather than throws」，示例即 `const gate = await requireAdmin(); if (!gate.ok) return reject(gate.message);`；src/lib/auth-page.ts 进一步明示 Server Action 可被直连 POST 绕过路由，load-bearing 的只有 action 体内的检查，2026-08-17 实测）。全仓既有十个写 action 无一例外分支检查 `gate.ok`；markdown 块从未编译，tsc/eslint 均无法捕获「丢弃了判别联合」。裸 await 下，匿名直连 POST 会继续走到 `senderFor(config).send(...)`——live 模式下即未授权触发一次真实外发（收件人限配置的管理员自身，故不是对外滥发，而是可被未认证者反复触发的 SMTP 中继/骚扰面，且违背文件头注释自述的边界承诺）。**裁决：src/lib/auth.ts byte-identical 不动**（returns-not-throws 是全仓十个 action 依赖的既有建模）；修法落在 Task 13 actions.ts（已内嵌 Step 1 块）：首行改 `const gate = await requireAdmin();`，紧接 `if (!gate.ok) { redirect(\`/login?from=${encodeURIComponent("/admin/alerts")}\`); }`。为何不用既有 action 的 `return reject(...)`：那些 action 由客户端 useActionState 消费 `AdminActionResult`，而本 action 是无参原生 `<form action>`、无客户端消费返回值，且四个正常出口全部已是 `redirect()`（Next 16 文档：Server Action 中 redirect 抛 NEXT_REDIRECT，无 JS 表单走 303），故未认证走同一重定向控制流最贴合本形态，且登录后经 login action 的 `safeDestination` 白名单回到 /admin/alerts（from 为固定站点相对路径，无开放重定向）。gate 仍是函数第一语句，「check before any config read / transport touch」意图完整保留。
    - **勘误 Q（Task 14 执行期发现：样板三处注释与代码/容器事实不符，修未提交的样板本身；另扩展一个 compose 注释行）**：质量评审对照 email-config.ts 与 docker compose env_file 语义逐条核实，Task 14 冻结块原文有三处会误导运维的措辞：① 文末段「fill this block and **restart the container**」错误——env_file 只在容器创建时注入，`docker compose restart` 不重读，配完 SMTP 只 restart 会静默留在干跑；DEPLOY.md 权威动作是 `docker compose -f docker-compose.prod.yml up -d`（recreate）。改为明示 recreate 并点名 plain restart 不重载 env_file。② SMTP_PORT 注释「465 … SMTP_SECURE must be true」易被读成校验承诺；代码只独立校验端口范围（1–65535）与 SECURE 字面布尔，**不交叉校验端口/TLS 组合**（email-config.ts:115-132），465+false 会通过配置、到真实发送才以 send-failed/exit 1 暴露（在频控卡「最近错误」而非配置错误卡）。补一句明确该行为。③ ALERT_ADMIN_EMAIL 注释只讲非法项，漏写「超过 3 个有效地址：干跑静默 slice 截断、live 报 config-error」（email-config.ts:75/86/100-104）。补全。三处均为注释/文档修正，零行为、零测试影响。另：`docker-compose.prod.yml:93-94` 既有注释「the app's entire env surface is the **6 vars**」在本功能落地后成为事实错误（实际 14 变量），虽不在 Task 14 原 Files 清单内，但这是本功能直接造成的注释陈旧化，按同一勘误纳入本任务提交（仅改注释两行，compose 行为零改动）；其 :39-41 既有「rotating it needs only a restart」同族不精确措辞非本功能引入，登记二期 backlog 不本轮扩面。同族的中文「重启容器」口语提示（Task 11 alerts-summary.ts 的 DRY_RUN_REASON_LABELS、Task 13 页面/configErrors 文案）属已冻结双评产物，runbook 附-3 的 `up -d` 是正确主路径，不改冻结代码，统一登记二期文案校准。
    - **勘误 R（Task 16 开工前协调者备料发现：DEPLOY.md 冻结章节阈值口径写错，只改本任务待写入的 runbook 文案）**：Task 16 Step 5 的 DEPLOY.md「第 10 步附」冻结块首句写「考勤数据如果连续 **3 个工作日**没有成功导入」，与代码实际口径矛盾——阈值判定按 **3 个自然日**（Task 13 子页 CONVENTION_NOTE 逐字「距上次成功导入超过 3 个自然日即触发告警」；import-staleness/alert-decision 按日历日；Task 9 评审已认定测试注释「six business days」是事实错误）。写 runbook 不得传播错误口径：该句改为「连续 **3 个自然日**」，其余文案不动（已内嵌 Task 16 Step 5 代码块）。
+   - **勘误 S（Task 16 质量评审发现、协调者对照代码核实后裁决：DEPLOY.md 冻结 runbook 章五处文案与代码行为/运维事实不符，只改 runbook 文案与本计划 Step 5 块；wrapper 与全部代码逐字不动，零行为零测试影响）**：① 附-1 验收三明治第 2 条把「停摆/**从未导入**」并列承诺必有 `alert-email-dry-run` 行——never 且无状态文件的首扫决策是 `baseline`（alert-decision.ts:42-44），干跑只对非 skip/baseline 决策发信（alert-service.ts:114-124），而干跑永不写状态（:114-138），未导入系统在整个干跑期每次扫描都停留在 baseline；空数据卷首扫（正是 Task 17 Step 3 的场景）无发信行，照原文会把正确验收误判为失败。改为按 `decision` 字段列三种正确形态。② 附-2 blockquote 只提示「按现网改 wrapper 的 cd 行」，漏说改到 `app/` 子目录后还必须显式加 `-f docker-compose.prod.yml`（compose 不自动发现该文件名；附-1 命令是现成正确形态）。wrapper 本身是 spec §5.6 逐字产物、注释已要求部署时 VERIFY，「/opt/manhour-mgmt 裸 compose 现网是否成立」仍是 R1 逐项核实项，**wrapper 本轮不动**。③ 附-4 `state-corrupt` 行声称「本次已按首扫自愈重写」——自愈重写只发生在 live 写盘分支；干跑 prev=null 时完全不写（alert-service.ts:125-136），损坏文件原样保留、每次扫描重复 state-corrupt/exit=0，「反复出现说明卷有问题」在默认干跑部署下是误诊。④ 附-4 `state-write-failed` 行只讲「意图未落盘→不发信」，漏了 `alert-email-sent` 之后落账失败（信已发出仍 exit 2，alert-service.ts:185-196）子情形，运维可能据此误重发。⑤ 同表「cron 毫无记录」行补日志文件对 crontab 属主可写的排查项。五处修正均已内嵌 Task 16 Step 5 代码块。另记录（不改）：质量评审静态判定镜像内 tsx 运行还需 `esbuild` + `@esbuild/linux-x64`（tsx 4.23.8 硬依赖 esbuild ~0.28，runner 只 COPY 了 tsx 本体）——这正是冻结 Step 2 注释与 Task 17 Step 5「缺什么补什么、不预判 COPY」的预留回路，**不在 Task 16 预防性加 COPY**，列为 Task 17 镜像实测的头号预判缺口。
 
 ---
 
@@ -3396,7 +3397,7 @@ docker compose -f docker-compose.prod.yml exec -T app \
 干跑验收三明治，三处缺一不可：
 
 1. **横幅**：每次运行第一行明确印 `MODE=DRY-RUN`。
-2. **日志**：本次若处于停摆/从未导入状态，日志里有 `{"evt":"alert-email-dry-run","toCount":…,"subject":…}`；健康系统则只有决策行、没有干跑发信行——两种都属正确。
+2. **日志（Erratum S：三种正确形态，看决策行 `alert-decision` 的 `decision` 字段区分）**：决策为 `send-first`/`send-repeat`/`send-recovery`（正在停摆）时，日志里有一行 `{"evt":"alert-email-dry-run","toCount":…,"subject":…}`；决策为 `skip`（健康）或 `baseline`（从未成功导入的冷启动基线）时，只有决策行、没有发信行。空数据卷首扫必然是 `baseline` 且无发信行——干跑永不写状态文件，未导入系统在整个干跑期每次扫描都停留在 baseline，这不是漏发。
 3. **状态与页面**：干跑不在数据卷创建 `alert-state.json`（`docker compose -f docker-compose.prod.yml exec app ls data/` 看不到它）；浏览器登录后 `/admin` 主页角标与 `/admin/alerts` 子页都显示「干跑中」。
 
 连跑两遍结果应完全一致（干跑不推进任何频控日期），这能证明切真发当天仍会发出首封提醒而不是被干跑历史"吃掉"。
@@ -3416,7 +3417,7 @@ crontab -e
 20 9,15 * * * /opt/manhour-mgmt/deploy/cron/check-attendance-alert.sh >> /var/log/manhour-attendance-alert.log 2>&1
 ```
 
-> **路径必须和现网对齐**：wrapper 里的 `cd` 行样板写的是 `/opt/manhour-mgmt`，本文件第 11 步备份任务用的是 `/opt/manhour-mgmt/app` 且显式带 `-f docker-compose.prod.yml`。装之前对照服务器上既有的考勤抓取 wrapper（`/opt/manhour-mgmt/scripts/fetch-attendance.sh`，若存在）确认 compose 项目目录，以现网为准改 wrapper 里的 `cd` 行。`exec` 的 `-T` 不能省（cron 没有 TTY）。
+> **路径必须和现网对齐**：wrapper 里的 `cd` 行样板写的是 `/opt/manhour-mgmt`，本文件第 11 步备份任务用的是 `/opt/manhour-mgmt/app` 且显式带 `-f docker-compose.prod.yml`。装之前对照服务器上既有的考勤抓取 wrapper（`/opt/manhour-mgmt/scripts/fetch-attendance.sh`，若存在）确认 compose 项目目录，以现网为准改 wrapper 里的 `cd` 行。`exec` 的 `-T` 不能省（cron 没有 TTY）。另外（Erratum S）：若按现网把 `cd` 改到 `app/` 子目录，还必须像附-1 的命令那样显式加 `-f docker-compose.prod.yml`——compose 不会自动发现这个文件名；wrapper 到底需不需要 `-f`，同样以现网 fetch wrapper 的实际写法为准。
 
 第二天确认 `/var/log/manhour-attendance-alert.log` 有两条横幅 + JSON 记录、无报错。
 
@@ -3437,9 +3438,9 @@ crontab -e
 | cron 跑了但脚本 `exit=1`，横幅 `MODE=CONFIG-ERROR` | 配置不合法。进 `/admin/alerts` 看渠道卡逐条错误（半配认证、端口非数字、邮箱格式错、超 3 个收件人等），改 `.env.production` 后重启。**配置错误绝不静默回退干跑。** |
 | `exit=1`，日志 `alert-email-failed` | 配置通过但 SMTP 连接/认证失败（中继不可达、口令错）。页面频控卡显示最近错误；同日不会重试，下个扫描时刻按频控再试。 |
 | `exit=2`，日志 `db-read-failed` | 数据库打不开/查询失败。先按第 9 步与 A-1/A-2 排查数据卷属主与 DATABASE_URL；告警此时不读不写状态、不发信。 |
-| `exit=2`，日志 `state-write-failed` | 数据卷不可写（频控状态 JSON 落盘失败）。意图未能落盘时本次不发信（防重复打扰）；查 data 卷属主与磁盘。 |
-| 日志有 `state-corrupt` 但 `exit=0` | 状态文件损坏，本次已按首扫自愈重写，不算故障；反复出现说明卷有问题。 |
-| cron 毫无记录 | 查 cron 服务、wrapper 的 `cd` 路径与可执行位、`-T` 参数；`docker compose ps` 确认容器在跑。 |
+| `exit=2`，日志 `state-write-failed` | 频控状态 JSON 落盘失败，查 data 卷属主与磁盘。按出现位置区分（Erratum S）：发信**意图**落盘失败时本次不发信（防重复打扰）；若该行出现在 `alert-email-sent` **之后**，说明邮件已经发出、只是发信后的落账失败，请勿据此重发。 |
+| 日志有 `state-corrupt` 但 `exit=0` | 状态文件损坏，本次已按「无历史文件」（首扫）处理。**真发模式**下本次扫描会重写文件、完成自愈；**干跑模式不写任何状态文件**（Erratum S），损坏文件原样保留、每次扫描重复出现这行——删掉该文件或切到真发后的首扫即可消除，这种重复不代表卷有问题。 |
+| cron 毫无记录 | 查 cron 服务、wrapper 的 `cd` 路径与可执行位、`-T` 参数，以及 `/var/log/manhour-attendance-alert.log` 对 crontab 属主是否可写（在 /var/log 下通常需 root 预先创建并 chown）；`docker compose ps` 确认容器在跑。 |
 | 页面显示「从未成功导入」 | 说明考勤抓取链路本身没通（第 10 步/SMB 挂载问题），告警是如实反映；告警通道与抓取共享 SMB 与否无关，先恢复数据导入。 |
 
 正常健康运行时：每次扫描只有横幅 + `scan-start` + `alert-decision{decision:"skip"}` + `scan-done`，不发信、不打扰。

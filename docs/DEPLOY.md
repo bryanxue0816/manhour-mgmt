@@ -383,7 +383,7 @@ docker compose -f docker-compose.prod.yml exec -T app \
 干跑验收三明治，三处缺一不可：
 
 1. **横幅**：每次运行第一行明确印 `MODE=DRY-RUN`。
-2. **日志**：本次若处于停摆/从未导入状态，日志里有 `{"evt":"alert-email-dry-run","toCount":…,"subject":…}`；健康系统则只有决策行、没有干跑发信行——两种都属正确。
+2. **日志（Erratum S：三种正确形态，看决策行 `alert-decision` 的 `decision` 字段区分）**：决策为 `send-first`/`send-repeat`/`send-recovery`（正在停摆）时，日志里有一行 `{"evt":"alert-email-dry-run","toCount":…,"subject":…}`；决策为 `skip`（健康）或 `baseline`（从未成功导入的冷启动基线）时，只有决策行、没有发信行。空数据卷首扫必然是 `baseline` 且无发信行——干跑永不写状态文件，未导入系统在整个干跑期每次扫描都停留在 baseline，这不是漏发。
 3. **状态与页面**：干跑不在数据卷创建 `alert-state.json`（`docker compose -f docker-compose.prod.yml exec app ls data/` 看不到它）；浏览器登录后 `/admin` 主页角标与 `/admin/alerts` 子页都显示「干跑中」。
 
 连跑两遍结果应完全一致（干跑不推进任何频控日期），这能证明切真发当天仍会发出首封提醒而不是被干跑历史"吃掉"。
@@ -403,7 +403,7 @@ crontab -e
 20 9,15 * * * /opt/manhour-mgmt/deploy/cron/check-attendance-alert.sh >> /var/log/manhour-attendance-alert.log 2>&1
 ```
 
-> **路径必须和现网对齐**：wrapper 里的 `cd` 行样板写的是 `/opt/manhour-mgmt`，本文件第 11 步备份任务用的是 `/opt/manhour-mgmt/app` 且显式带 `-f docker-compose.prod.yml`。装之前对照服务器上既有的考勤抓取 wrapper（`/opt/manhour-mgmt/scripts/fetch-attendance.sh`，若存在）确认 compose 项目目录，以现网为准改 wrapper 里的 `cd` 行。`exec` 的 `-T` 不能省（cron 没有 TTY）。
+> **路径必须和现网对齐**：wrapper 里的 `cd` 行样板写的是 `/opt/manhour-mgmt`，本文件第 11 步备份任务用的是 `/opt/manhour-mgmt/app` 且显式带 `-f docker-compose.prod.yml`。装之前对照服务器上既有的考勤抓取 wrapper（`/opt/manhour-mgmt/scripts/fetch-attendance.sh`，若存在）确认 compose 项目目录，以现网为准改 wrapper 里的 `cd` 行。`exec` 的 `-T` 不能省（cron 没有 TTY）。另外（Erratum S）：若按现网把 `cd` 改到 `app/` 子目录，还必须像附-1 的命令那样显式加 `-f docker-compose.prod.yml`——compose 不会自动发现这个文件名；wrapper 到底需不需要 `-f`，同样以现网 fetch wrapper 的实际写法为准。
 
 第二天确认 `/var/log/manhour-attendance-alert.log` 有两条横幅 + JSON 记录、无报错。
 
@@ -424,9 +424,9 @@ crontab -e
 | cron 跑了但脚本 `exit=1`，横幅 `MODE=CONFIG-ERROR` | 配置不合法。进 `/admin/alerts` 看渠道卡逐条错误（半配认证、端口非数字、邮箱格式错、超 3 个收件人等），改 `.env.production` 后重启。**配置错误绝不静默回退干跑。** |
 | `exit=1`，日志 `alert-email-failed` | 配置通过但 SMTP 连接/认证失败（中继不可达、口令错）。页面频控卡显示最近错误；同日不会重试，下个扫描时刻按频控再试。 |
 | `exit=2`，日志 `db-read-failed` | 数据库打不开/查询失败。先按第 9 步与 A-1/A-2 排查数据卷属主与 DATABASE_URL；告警此时不读不写状态、不发信。 |
-| `exit=2`，日志 `state-write-failed` | 数据卷不可写（频控状态 JSON 落盘失败）。意图未能落盘时本次不发信（防重复打扰）；查 data 卷属主与磁盘。 |
-| 日志有 `state-corrupt` 但 `exit=0` | 状态文件损坏，本次已按首扫自愈重写，不算故障；反复出现说明卷有问题。 |
-| cron 毫无记录 | 查 cron 服务、wrapper 的 `cd` 路径与可执行位、`-T` 参数；`docker compose ps` 确认容器在跑。 |
+| `exit=2`，日志 `state-write-failed` | 频控状态 JSON 落盘失败，查 data 卷属主与磁盘。按出现位置区分（Erratum S）：发信**意图**落盘失败时本次不发信（防重复打扰）；若该行出现在 `alert-email-sent` **之后**，说明邮件已经发出、只是发信后的落账失败，请勿据此重发。 |
+| 日志有 `state-corrupt` 但 `exit=0` | 状态文件损坏，本次已按「无历史文件」（首扫）处理。**真发模式**下本次扫描会重写文件、完成自愈；**干跑模式不写任何状态文件**（Erratum S），损坏文件原样保留、每次扫描重复出现这行——删掉该文件或切到真发后的首扫即可消除，这种重复不代表卷有问题。 |
+| cron 毫无记录 | 查 cron 服务、wrapper 的 `cd` 路径与可执行位、`-T` 参数，以及 `/var/log/manhour-attendance-alert.log` 对 crontab 属主是否可写（在 /var/log 下通常需 root 预先创建并 chown）；`docker compose ps` 确认容器在跑。 |
 | 页面显示「从未成功导入」 | 说明考勤抓取链路本身没通（第 10 步/SMB 挂载问题），告警是如实反映；告警通道与抓取共享 SMB 与否无关，先恢复数据导入。 |
 
 正常健康运行时：每次扫描只有横幅 + `scan-start` + `alert-decision{decision:"skip"}` + `scan-done`，不发信、不打扰。
