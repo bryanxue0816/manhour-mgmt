@@ -3481,6 +3481,8 @@ git commit -m "ops: package alert script in image and add host cron runbook"
 
 - [ ] **Step 0: 🛑 请批门 —— 停下报告，等明确批准**
 
+> **执行记录（2026-09-13，BLOCKED→推迟）**：用户已批准执行 Task 17，但本机经四重检测确认无容器环境（`docker` 不存在、无 Docker Desktop、无 WSL2、无 podman），命中本步「Docker 不存在→计划挂起、不做任何绕过」条件；用户亦暂无远程机。**用户裁决：镜像验证推迟到部署窗口（纳入 R1 连机逐项授权），先行收尾。** 可携带执行手册已备于 `.claude/out/task17-docker-runbook-20260913.md`（含源码打包 CLEAN 自查、build/五项核对/空卷两遍干跑逐步预期、症状驱动修复预案、回传证据清单）。静态预判的头号首建缺口：①tsx 4.23.8 硬依赖 `esbuild` + 平台二进制 `@esbuild/linux-x64`（runner 现未 COPY，首跑 import 期必崩，按预案补两条 COPY 即可，禁止预堆）；②嵌套 better-sqlite3 v12 的 Linux prebuild 需 github.com 可达（node-gyp 兜底）。Task 17 在部署窗口按手册执行后补出 Step 7 验收报告，本计划复选框在此之前保持未勾。
+
 向用户申请：执行 `docker build`（纯本地构建，build context 为本机 `app/`，不连任何服务器、不推镜像、不起生产容器、不碰 `manhour-prod.db`）。若本机 `docker version` 显示 Docker 不存在或守护进程不可用，则本任务整体转移到具备 Docker 的机器执行，计划在此挂起并报告，不做任何绕过。
 
 批准后先确认环境：
