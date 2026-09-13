@@ -6,14 +6,16 @@
 > 本手册性质：**一次性验收规程**（不是 DEPLOY.md 的一部分，不随镜像发布）。开发机没有 Docker（无 Docker Desktop、无 WSL2），经用户裁决转移到具备 Docker 的机器执行。
 > 执行者可以是工程师或另一个 AI agent；零上下文照做即可。每一步**保存完整原始输出**（建议 `2>&1 | tee stepN.log`），最后按 §9 清单回传。
 >
-> **收尾批次锚点（拿到代码树后先自校验，三条全中才是对的树）**：
+> **收尾批次锚点（拿到代码树后先自校验，三条全中才是对的树）**：三条都是**零依赖静态指纹**，全新 clone 或解 tar 后立即可跑，无需宿主安装 Node/npm（纯 Docker 目标机 §0 前置只要求 Docker，构建全在容器内）。
 > ```sh
 > test -f docs/ops/task17-docker-verification.md && echo HANDBOOK-OK
-> npm test 2>&1 | grep -E 'Tests +777 passed'   # 必须有输出（42 个测试文件 / 777 例）
+> grep -c "2026-13-01T00:00:00+08:00" tests/alerts/alert-state.test.ts   # 必须 >= 1（Erratum T 的 isNaN 第二道防线用例在树内）
 > grep -c -E 'registry\.npmjs\.org|github\.com|cdn\.sheetjs\.com|binaries\.prisma\.sh|deb\.debian\.org' docs/ops/task17-docker-verification.md  # 必须 >= 5（§0 五处出网端点）
 > ```
 >
-> **2026-09-13 勘误 U 升级**：终审交付维用仓外沙箱实证了三组 **100% 首跑阻断**（prisma CLI 缺 38 包闭包、tsx 缺 esbuild、standalone trace 裁掉 adapter 的 CJS 件）。本手册随之从「失败预案」升级为「已实证的确定性首步」：迁移改走 builder target 一次性容器（§5.2/§6.1），§6 三组修法均可照抄，并新增 §7 的 16 项部署窗口预检表。**构建产物等价性（已在收尾工作树亲自核实）**：`git diff b3218e4 -- Dockerfile docker-compose.prod.yml package.json package-lock.json deploy/cron .dockerignore` 输出为空（empty diff）——早期钉板 b3218e4 以来构建相关七路径零变化；本批次只改文档、alert-state 校验及其测试（tests/ 不入镜像），故 §3-§6 针对的镜像产物与钉板完全等价。
+> 「42 个测试文件 / 777 例全过」是**开发机/CI 门禁**（需先 `npm ci`），**不是**便携拿树校验，纯 Docker 目标机跳过——目标机以 §4 镜像五项核对与 §5 容器内两遍干跑为准（tests/ 不入生产镜像）。
+>
+> **2026-09-13 勘误 U 升级**：终审交付维用仓外沙箱实证了三组 **100% 首跑阻断**（prisma CLI 缺 38 包闭包、tsx 缺 esbuild、standalone trace 裁掉 adapter 的 CJS 件）。本手册随之从「失败预案」升级为「已实证的确定性首步」：迁移改走 builder target 一次性容器（§5.2/§6.1），§6 三组修法均可照抄，并新增 §7 的 16 项部署窗口预检表。**构建产物等价性（已在收尾工作树亲自核实）**：`git diff b3218e4 -- Dockerfile docker-compose.prod.yml package.json package-lock.json deploy/cron .dockerignore` 输出为空（empty diff）——早期钉板 b3218e4 以来构建相关路径零变化（命令中是 6 个 pathspec，其中 `deploy/cron` 为目录、内含 wrapper 与 crontab 两个文件，合计 7 个文件；命令本身保持目录 pathspec 不动）；本批次只改文档、alert-state 校验及其测试（tests/ 不入镜像），故 §3-§6 针对的镜像产物与钉板完全等价。
 
 ---
 
@@ -51,10 +53,11 @@ git clone <app 内层仓 remote> app
 cd app
 git checkout master
 git pull --ff-only         # 确保是含收尾批次的最新 master
-# 锚点自校验（见本文件头部，三条必须全中）：
+# 锚点自校验（见本文件头部，三条零依赖静态指纹必须全中，无需装 Node）：
 test -f docs/ops/task17-docker-verification.md && echo HANDBOOK-OK
-npm test 2>&1 | grep -E 'Tests +777 passed'   # 必须有输出（42 文件 / 777 例）
+grep -c "2026-13-01T00:00:00+08:00" tests/alerts/alert-state.test.ts   # >= 1（Erratum T 用例在树内）
 grep -c -E 'registry\.npmjs\.org|github\.com|cdn\.sheetjs\.com|binaries\.prisma\.sh|deb\.debian\.org' docs/ops/task17-docker-verification.md  # >= 5
+# 「42 文件 / 777 例」是开发机/CI 门禁（先 npm ci），目标机不跑；见文件头部说明。
 ```
 
 ### 1b. 打包携带（无 remote 或不便 push 时，推荐）
@@ -97,7 +100,7 @@ echo "<上面记录的 sha256>  manhour-app-alert-closeout-src.tar.gz" | sha256s
 tar -xzf manhour-app-alert-closeout-src.tar.gz
 cd app
 ls Dockerfile package.json package-lock.json prisma.config.ts src scripts | head
-# 无 .git 无妨；树的对错不靠 SHA，靠头部的三条锚点自校验（HANDBOOK-OK / 777 例 / 五端点）
+# 无 .git 无妨；树的对错不靠 SHA，靠头部的三条零依赖锚点自校验（HANDBOOK-OK / Erratum T 用例 / 五端点）；777 例门禁仅开发机/CI 跑
 ```
 
 > 本手册版本化于 `app/docs/ops/task17-docker-verification.md`（`.dockerignore` 排除 docs/，不进镜像）；带到目标机时单独复制该文件即可。
@@ -165,7 +168,7 @@ docker run --rm --entrypoint sh manhour-mgmt:alert-walkthrough -c '
 2. `src/lib/alerts/` 恰含本期六模块：`alert-decision.ts`、`alert-service.ts`、`alert-state.ts`、`alert-template.ts`、`email-config.ts`、`email-sender.ts`。
 3. `src/generated/prisma/` 有 Prisma client 生成产物（`prisma generate` 在 builder 阶段生成）。
 4. nodemailer `package.json` 在位，版本打印 **`10.x`**（锁定 10.0.9）；`node_modules/nodemailer/node_modules` 不存在或为空（零传递依赖的实物证据）。
-5. `@prisma/` 下能看到 `adapter-better-sqlite3`；嵌套 better-sqlite3 原生件在位（v12 走 prebuild-install，预期路径 `…/better-sqlite3/build/Release/better_sqlite3.node`；若该路径为空，再查 `find node_modules/@prisma -name '*.node'` 并如实记录实际位置）。**首建镜像里该包是 standalone trace 件：`dist/` 下只有 `index.mjs`（CJS 件 `dist/index.js` 被 trace 裁掉，已在开发机 `.next/standalone` 实物核实，见 §6.3）——这是预期的首建形态，不是拷贝损坏。** 按 §6.2/§6.3 补 COPY 重建后必须重跑本核对：届时要同时见到 `dist/index.js` 与嵌套路径下的 Linux `.node`（用 §9 的魔数目检确认是 ELF：前 4 字节 `7f 45 4c 46`，而非 PE 的 `4d 5a`）。
+5. `@prisma/` 下能看到 `adapter-better-sqlite3`；嵌套 better-sqlite3 原生件在位（v12 走 prebuild-install，预期路径 `…/better-sqlite3/build/Release/better_sqlite3.node`；若该路径为空，再查 `find node_modules/@prisma -name '*.node'` 并如实记录实际位置）。**首建镜像里该包是 standalone trace 件：`dist/` 下只有 `index.mjs`（CJS 件 `dist/index.js` 被 trace 裁掉，已在开发机 `.next/standalone` 实物核实，见 §6.3）——这是预期的首建形态，不是拷贝损坏。** 按 §6.2/§6.3 补 COPY 重建后必须重跑本核对：届时要同时见到 `dist/index.js` 与嵌套路径下的 Linux `.node`（用 §9 的魔数目检确认是 ELF：前 4 字节完整为 `7f 45 4c 46`，而非以 `4d 5a` 开头的 PE）。
 6. tsconfig 打印内容含 `"paths"` 与 `"@/*": ["./src/*"]`（tsx 解析 `@/` 的依据）。
 
 任一条与预期不符：**先不要改东西**，继续 §5 跑一次——运行时实际报错比静态 ls 更能精确定位缺什么，然后按 §6 处置。
@@ -273,7 +276,7 @@ docker run --rm -e DATABASE_URL=file:/app/data/test.db \
 
 ### 6.2 阻断组 2：tsx 启动即崩，找不到 esbuild
 
-- **症状关键字**：RUN 1/2 连横幅都没打印、exit 1：`Cannot find module 'esbuild'` / `ERR_MODULE_NOT_FOUND … esbuild`；只补 esbuild JS 包后再报：`The package "@esbuild/linux-x64" could not be found, and is needed by esbuild.`（沙箱两步均实测复现）。
+- **症状关键字（修复前首跑，`set -e` 语义，与 §5.3「修复前首跑的输出形态」说明同一口径）**：只见 `===== RUN 1 =====` 横幅后 node 报错栈，**没有** `exit=` 输出、**RUN 2 不执行**（node 非零退出直接终止容器 shell，不是脚本自己打印 exit 1）：`Cannot find module 'esbuild'` / `ERR_MODULE_NOT_FOUND … esbuild`；只补 esbuild JS 包后再次首跑仍终止于 RUN 1，报：`The package "@esbuild/linux-x64" could not be found, and is needed by esbuild.`（沙箱两步均实测复现）。
 - **根因（本仓实证）**：tsx 4.23.8 的 `node_modules/tsx/dist/loader.cjs:1` 顶层 `require("esbuild")`；runner 只 COPY 了 tsx 本体（Dockerfile:202）。esbuild 0.28.1 用 optionalDependencies 声明 **26 个平台包**，已全部锁入 package-lock（os/cpu 标记齐全），Linux x64 上 `npm ci` 必装 `@esbuild/linux-x64` 进 builder，无需 `--no-optional` 方面的担心。
 - **修法（两条整包 COPY，放在 runner 阶段 tsx/nodemailer COPY 附近，约 :207 后）**：
   ```dockerfile
@@ -298,7 +301,7 @@ docker run --rm -e DATABASE_URL=file:/app/data/test.db \
 
 - **症状关键字**：构建期 `prebuild-install` 失败、`ETIMEDOUT github.com`，或落入 `node-gyp rebuild`（python3/make/g++ 调用）；运行期 `invalid ELF header` / `Cannot find module …better_sqlite3.node` / `was compiled against a different Node.js version`。
 - **事实**：adapter 实际加载的是嵌套 **v12.11.1**（`node_modules/@prisma/adapter-better-sqlite3/node_modules/better-sqlite3`），不是顶层 v13。v12 无自带 prebuild，安装脚本 `prebuild-install || node-gyp rebuild --release`：Linux 件由 prebuild-install 从 GitHub release 按 ABI（Node 24 = ABI 137，资产是否命中未验证）下载；下载失败时 deps 层已装的 python3/make/g++ 兜底（Dockerfile:88-90，出网需 deb.debian.org，见 §0⑤）。
-- **修法/核对**：预先放通 github.com（含 objects 域名）；不通则确认 node-gyp 兜底成功。构建后必须亲眼见到嵌套路径下的 linux `.node`（Step 2 第 5 项 + §9 的魔数目检：`head -c 4 <.node> | od -An -tx1` 应为 `7f 45 4c 46`，`4d 5a` 即 MZ/PE），不得是 Windows PE。§6.3 的 adapter 整包 COPY 已把嵌套目录带入 runner；若整包内仍无 `.node`，根因在构建期获取失败（本节），不是 COPY 遗漏。
+- **修法/核对**：预先放通 github.com（含 objects 域名）；不通则确认 node-gyp 兜底成功。构建后必须亲眼见到嵌套路径下的 linux `.node`（Step 2 第 5 项 + §9 的魔数目检：`head -c 4 <.node> | od -An -tx1` 应为完整四字节 `7f 45 4c 46`；以 `4d 5a` 开头（常见 `4d 5a 90 00`）即 MZ/PE），不得是 Windows PE。§6.3 的 adapter 整包 COPY 已把嵌套目录带入 runner；若整包内仍无 `.node`，根因在构建期获取失败（本节），不是 COPY 遗漏。
 - 禁止复制 Windows 开发机 node_modules 里的任何 .node（PE 二进制，进 Linux 必报 invalid ELF；`.dockerignore` 已排除整个 node_modules，不要绕过）。
 
 ### 6.5 tsx 不解析 `@/` 路径别名（预期不需要的退路）
@@ -333,7 +336,7 @@ docker run --rm -e DATABASE_URL=file:/app/data/test.db \
 | # | 概率 | 阶段 | 症状关键字（日志原文特征） | 根因 | 现场动作 |
 |---|---|---|---|---|---|
 | 1 | **100%** | 首跑·迁移 | `Cannot find module 'effect'`（连锁 `@prisma/studio-core/data/bff`、`@prisma/dev/internal/state`、`pathe`、`graphmatch`、jiti/c12）；或 CLI 启动即 exit 1 | prisma 7.9.1 CLI bundle eager require（cli.js:5534-5535）+ @prisma/config 闭包；runner 缺 38 包 | 方案 A：builder target 一次性容器（§5.2/§6.1，推荐，零镜像改动）；方案 B：runner 补 38 条 COPY（附录 A） |
-| 2 | **100%** | 首跑·告警脚本 | 连横幅都没有，exit 1：`Cannot find module 'esbuild'`；补后变 `The package "@esbuild/linux-x64" could not be found` | tsx 4.23.8 顶层 require esbuild；runner 只 COPY tsx | runner 加两条 COPY（§6.2）；lock 已锁 26 平台包，linux npm ci 必装 |
+| 2 | **100%** | 首跑·告警脚本 | 见 `===== RUN 1 =====` 后即终止：`Cannot find module 'esbuild'`（`set -e` 下无 `exit=` 输出、RUN 2 不执行，§5.3/§6.2）；补 esbuild JS 包后再跑仍终止于 RUN 1：`The package "@esbuild/linux-x64" could not be found` | tsx 4.23.8 顶层 require esbuild；runner 只 COPY tsx | runner 加两条 COPY（§6.2）；lock 已锁 26 平台包，linux npm ci 必装 |
 | 3 | **100%** | 首跑·告警脚本 | `Cannot find module '…/adapter-better-sqlite3/dist/index.js'`；补后可能再报 `…/driver-adapter-utils/dist/index.js` | trace 只留 ESM `.mjs`；tsx CJS require 被裁的 `.js` | 两条整包 COPY（§6.3）；**禁止**加 package.json `type:module`（波及 server.js） |
 | 4 | 高 | 构建期 deps | `prebuild-install` 失败、`ETIMEDOUT github.com`、或落入 `node-gyp rebuild` | 嵌套 better-sqlite3@12.11.1 无自带 prebuild，从 GitHub release 按 ABI 下载；Node24/ABI137 资产命中未验证 | 放通 github.com（含 objects 域名）；确认 node-gyp 兜底成功（toolchain 已在 deps 层）；构建后亲见嵌套路径 linux `.node`（魔数 `7f 45 4c 46`，§9） |
 | 5 | 高（视出网策略） | 构建期 deps | `@prisma/engines` postinstall 报错 / `fetch-engine` 下载失败 / schema-engine 相关 ENOTFOUND | schema-engine linux 二进制构建期从 `binaries.prisma.sh` 拉 | 放通该域；构建日志确认 postinstall exit 0；镜像内 `find node_modules/@prisma/engines -name 'schema-engine-linux-*'` 有结果（§9） |
@@ -381,7 +384,7 @@ docker volume ls | grep manhour-alert-test || echo "volume removed"
      uname -m
    '
    ```
-   预期：`.node` 打印 **`7f 45 4c 46`**（ELF 魔数 `\x7fELF`，x86-64 Linux 原生件）；若打印 **`4d 5a`**（ASCII `MZ`，PE/Windows 二进制）说明 ABI 资产错误（Windows 件混入或下错 prebuild），停止并回报；find 能列出 `schema-engine-linux-*`；`date` 为 **CST/+0800**（预检 #15，不符需加 tzdata）；`uname -m` 为 `x86_64`。
+   预期（`od` 一次打印完整 4 字节）：`.node` 四字节**完整等于** **`7f 45 4c 46`**（ELF 魔数 `\x7fELF`，x86-64 Linux 原生件，要求四字节全匹配）；若打印**以 `4d 5a` 开头**（后两字节任意，常见 PE 为 `4d 5a 90 00`；ASCII `MZ` 前缀即 PE/Windows 二进制，不要求后两字节相同）说明 ABI 资产错误（Windows 件混入或下错 prebuild），停止并回报；find 能列出 `schema-engine-linux-*`；`date` 为 **CST/+0800**（预检 #15，不符需加 tzdata）；`uname -m` 为 `x86_64`。
 4. `step1b-builder.log` + `step3-migrate.log`：builder target 构建输出；迁移列出 9 个迁移并以 `All migrations have been successfully applied.` 结束；`ls -ln data/` 中 test.db 属主列显示数字 `1000 1000`（不是 `node node`）。
 5. `step3-dryrun.log`：两遍横幅/JSON/exit + data 目录清单，逐行满足 §5.3 预期。
 6. **三组阻断的实际命中与采用方案**：逐条「症状原文 → 采用方案 A/B 或哪几条 COPY（完整 Dockerfile diff）→ 重建/复测结果」；最终 Dockerfile/源码 diff 单独成文（预期恰好是 §6.2 + §6.3 共 4 条 COPY，且无其他改动）。
