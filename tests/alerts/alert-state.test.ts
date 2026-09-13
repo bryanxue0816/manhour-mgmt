@@ -113,6 +113,11 @@ describe("alert-state file IO", () => {
     ["lastSentAt", "not-a-date"],
     ["lastSentAt", ""],
     ["lastSentAt", 123],
+    // Shape-valid but semantically impossible instants: these pass
+    // INSTANT_PATTERN (which checks digits/shape only) and must be stopped by
+    // the second line of defence, the Number.isNaN(new Date(...)) check.
+    ["lastCheckAt", "2026-13-01T00:00:00+08:00"], // month 13
+    ["lastSentAt", "2026-01-01T00:60:00+08:00"], // minute 60
   ];
 
   it.each(malformedInstantCases)(
