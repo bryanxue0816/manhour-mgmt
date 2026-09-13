@@ -85,7 +85,7 @@ git rev-parse --short HEAD 2>/dev/null || true   # 无 .git 无妨；以包名 b
 ls Dockerfile package.json package-lock.json prisma.config.ts src scripts | head
 ```
 
-> 本手册本身位于开发机 `app/.claude/out/task17-docker-runbook-20260913.md`，被打包排除；如需在目标机对照，请单独复制该文件。
+> 本手册版本化于 `app/docs/ops/task17-docker-verification.md`（`.dockerignore` 排除 docs/，不进镜像）；带到目标机时单独复制该文件即可。
 
 ---
 

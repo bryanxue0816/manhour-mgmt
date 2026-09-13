@@ -55,3 +55,7 @@ next-env.d.ts
 # run when any changed file was touched recently, so its own log would keep the
 # working tree permanently "just modified" and no auto-commit would ever fire.
 /.autocommit/
+
+# Local agent session outputs: subagent review scratch files, portable runbooks.
+# Working notes only - never part of the shipped tree.
+/.claude/out/
