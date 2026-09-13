@@ -364,6 +364,75 @@ curl -s -o /dev/null -w '%{http_code}\n' http://<服务器IP>/
 
 ---
 
+## 第 10 步附：考勤停摆邮件告警
+
+考勤数据如果连续 3 个自然日没有成功导入，系统会给管理员发邮件提醒（Erratum R：阈值按日历日，不是工作日）。扫描脚本随镜像自带，由**宿主机的定时任务**每天 09:20、15:20 在容器内执行两次（闹钟放在容器外：容器停了 cron 反而会留痕，这是有意设计）。
+
+**默认是干跑模式，不会真的发信**：`.env.production` 里 `SMTP_HOST` 留空时，扫描照常运行、状态照常判断，"本应发出的邮件"只在容器日志里打一行 `alert-email-dry-run`，且不会创建任何状态文件。这不是配置错误，是安全默认值。
+
+### 附-1 先手动干跑一次（不装 cron 也能验收）
+
+```bash
+cd /opt/manhour-mgmt/app
+docker compose -f docker-compose.prod.yml exec -T app \
+  node node_modules/tsx/dist/cli.mjs scripts/check-attendance-alert.ts; echo "exit=$?"
+```
+
+应该看到：第一行横幅 `[attendance-alert] MODE=DRY-RUN …`，随后若干单行 JSON 日志（`scan-start`、`alert-decision`、`scan-done`），最后 `exit=0`。
+
+干跑验收三明治，三处缺一不可：
+
+1. **横幅**：每次运行第一行明确印 `MODE=DRY-RUN`。
+2. **日志**：本次若处于停摆/从未导入状态，日志里有 `{"evt":"alert-email-dry-run","toCount":…,"subject":…}`；健康系统则只有决策行、没有干跑发信行——两种都属正确。
+3. **状态与页面**：干跑不在数据卷创建 `alert-state.json`（`docker compose -f docker-compose.prod.yml exec app ls data/` 看不到它）；浏览器登录后 `/admin` 主页角标与 `/admin/alerts` 子页都显示「干跑中」。
+
+连跑两遍结果应完全一致（干跑不推进任何频控日期），这能证明切真发当天仍会发出首封提醒而不是被干跑历史"吃掉"。
+
+### 附-2 安装宿主机定时任务
+
+镜像里的脚本路径是 `scripts/check-attendance-alert.ts`；仓库 `deploy/cron/` 提供了版本化 wrapper 与 crontab 样板。把 wrapper 放到部署目录后（路径与 crontab 行保持一致）：
+
+```bash
+chmod +x /opt/manhour-mgmt/deploy/cron/check-attendance-alert.sh
+crontab -e
+```
+
+加入（样板来自 `deploy/cron/crontab.example`）：
+
+```cron
+20 9,15 * * * /opt/manhour-mgmt/deploy/cron/check-attendance-alert.sh >> /var/log/manhour-attendance-alert.log 2>&1
+```
+
+> **路径必须和现网对齐**：wrapper 里的 `cd` 行样板写的是 `/opt/manhour-mgmt`，本文件第 11 步备份任务用的是 `/opt/manhour-mgmt/app` 且显式带 `-f docker-compose.prod.yml`。装之前对照服务器上既有的考勤抓取 wrapper（`/opt/manhour-mgmt/scripts/fetch-attendance.sh`，若存在）确认 compose 项目目录，以现网为准改 wrapper 里的 `cd` 行。`exec` 的 `-T` 不能省（cron 没有 TTY）。
+
+第二天确认 `/var/log/manhour-attendance-alert.log` 有两条横幅 + JSON 记录、无报错。
+
+### 附-3 从干运转真发（检查清单）
+
+按顺序做，不要跳：
+
+1. 编辑 `.env.production`：`SMTP_HOST` 填内网中继、`SMTP_FROM` 填发件地址、`ALERT_ADMIN_EMAIL` 填管理员邮箱（逗号分隔，最多 3 个）；端口/加密/认证按中继要求配（`SMTP_PORT=25`、`SMTP_SECURE=false` 是无认证内网中继的默认；465 端口须把 `SMTP_SECURE` 改 true；`SMTP_USER`/`SMTP_PASS` 必须同时留空或同时填写）。口令只在服务器上填，不进仓库、不进聊天记录。
+2. `docker compose -f docker-compose.prod.yml up -d` 重启 app 容器让环境变量生效。
+3. 登录 `/admin/alerts`，确认渠道卡不再显示「干跑中」、收件人数量正确、无配置错误条目；点「发送测试邮件」。
+4. **确认管理员信箱真的收到测试邮件后**，再信任定时通道；随后观察下一个 09:20/15:20 的日志为 `alert-email-sent` 或（正常时）无发信行。
+5. 需要临时停发（如中继迁移）时不必清空配置：把 `ALERT_EMAIL_DRY_RUN=true` 重启即强制干跑，优先级最高。
+
+### 附-4 排查表
+
+| 现象 | 含义与处理 |
+|---|---|
+| cron 跑了但脚本 `exit=1`，横幅 `MODE=CONFIG-ERROR` | 配置不合法。进 `/admin/alerts` 看渠道卡逐条错误（半配认证、端口非数字、邮箱格式错、超 3 个收件人等），改 `.env.production` 后重启。**配置错误绝不静默回退干跑。** |
+| `exit=1`，日志 `alert-email-failed` | 配置通过但 SMTP 连接/认证失败（中继不可达、口令错）。页面频控卡显示最近错误；同日不会重试，下个扫描时刻按频控再试。 |
+| `exit=2`，日志 `db-read-failed` | 数据库打不开/查询失败。先按第 9 步与 A-1/A-2 排查数据卷属主与 DATABASE_URL；告警此时不读不写状态、不发信。 |
+| `exit=2`，日志 `state-write-failed` | 数据卷不可写（频控状态 JSON 落盘失败）。意图未能落盘时本次不发信（防重复打扰）；查 data 卷属主与磁盘。 |
+| 日志有 `state-corrupt` 但 `exit=0` | 状态文件损坏，本次已按首扫自愈重写，不算故障；反复出现说明卷有问题。 |
+| cron 毫无记录 | 查 cron 服务、wrapper 的 `cd` 路径与可执行位、`-T` 参数；`docker compose ps` 确认容器在跑。 |
+| 页面显示「从未成功导入」 | 说明考勤抓取链路本身没通（第 10 步/SMB 挂载问题），告警是如实反映；告警通道与抓取共享 SMB 与否无关，先恢复数据导入。 |
+
+正常健康运行时：每次扫描只有横幅 + `scan-start` + `alert-decision{decision:"skip"}` + `scan-done`，不发信、不打扰。
+
+---
+
 ## 第 11 步：配置每日自动备份
 
 **做什么**

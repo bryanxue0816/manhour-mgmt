@@ -1,0 +1,2 @@
+# Attendance staleness email alert: scans after the 09:05 / 15:05 fetches.
+20 9,15 * * * /opt/manhour-mgmt/deploy/cron/check-attendance-alert.sh >> /var/log/manhour-attendance-alert.log 2>&1

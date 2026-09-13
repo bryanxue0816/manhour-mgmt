@@ -200,6 +200,11 @@ COPY --from=builder --chown=node:node /app/node_modules/@prisma/config ./node_mo
 COPY --from=builder --chown=node:node /app/node_modules/@prisma/engines ./node_modules/@prisma/engines
 COPY --from=builder --chown=node:node /app/node_modules/dotenv ./node_modules/dotenv
 COPY --from=builder --chown=node:node /app/node_modules/tsx ./node_modules/tsx
+# nodemailer drives scripts/check-attendance-alert.ts. Pure JavaScript with zero
+# runtime dependencies (verified by npm ls at install time, Task 7), so the one
+# package directory is the whole requirement. @types/nodemailer is build-time
+# only and intentionally NOT copied: tsx erases types without loading it.
+COPY --from=builder --chown=node:node /app/node_modules/nodemailer ./node_modules/nodemailer
 
 # The backup script and the top-level better-sqlite3 it imports.
 #
@@ -220,7 +225,18 @@ COPY --from=builder --chown=node:node /app/node_modules/tsx ./node_modules/tsx
 # one platform would silently break an arm64 deployment, and 16 MB of
 # prebuilds is not worth that fragility.
 COPY --from=builder --chown=node:node /app/node_modules/better-sqlite3 ./node_modules/better-sqlite3
-COPY --from=builder --chown=node:node /app/scripts/backup-db.mjs ./scripts/backup-db.mjs
+# All host-run scripts, not just backup-db.mjs. fetch-attendance.ts and
+# check-attendance-alert.ts are TypeScript executed with tsx, which needs
+# tsconfig.json at /app (the "@/*" path alias maps to ./src/*) plus the src/lib
+# and src/generated trees the alert chain imports. The backup script keeps
+# working: it lives in the copied scripts/ directory and its relative data path
+# is unchanged. What the alert chain actually resolves at runtime is verified
+# against the built image in the image-test task; missing packages get added
+# there only if the run proves them missing - no speculative COPYs here.
+COPY --from=builder --chown=node:node /app/scripts ./scripts
+COPY --from=builder --chown=node:node /app/tsconfig.json ./tsconfig.json
+COPY --from=builder --chown=node:node /app/src/lib ./src/lib
+COPY --from=builder --chown=node:node /app/src/generated ./src/generated
 
 # Mount points, created as root and handed to uid 1000. Both are expected to be
 # bind-mounted or volume-backed at runtime; creating them here means a
