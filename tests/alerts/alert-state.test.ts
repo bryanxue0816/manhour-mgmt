@@ -87,6 +87,77 @@ describe("alert-state file IO", () => {
     expect(await readAlertState(file)).toEqual(baseline);
   });
 
+  // Erratum T: every instant field must carry the exact toStateInstant() shape;
+  // a malformed string otherwise survives validation and makes the admin page
+  // throw RangeError while formatting an Invalid Date (HTTP 500).
+  const canonicalState = (): Record<string, unknown> => ({
+    schemaVersion: ALERT_STATE_SCHEMA_VERSION,
+    lastState: "stale",
+    firstAlertDate: "2026-09-08",
+    lastAlertDate: "2026-09-11",
+    lastRecoveryDate: null,
+    lastCheckAt: toStateInstant(new Date("2026-09-11T01:20:00.000Z")),
+    lastAttemptAt: toStateInstant(new Date("2026-09-11T01:20:00.000Z")),
+    lastSentAt: toStateInstant(new Date("2026-09-11T01:20:00.000Z")),
+    lastError: null,
+  });
+
+  type InstantField = "lastCheckAt" | "lastAttemptAt" | "lastSentAt";
+  const malformedInstantCases: ReadonlyArray<[InstantField, unknown]> = [
+    ["lastCheckAt", "not-a-date"],
+    ["lastCheckAt", ""],
+    ["lastCheckAt", 123],
+    ["lastAttemptAt", "not-a-date"],
+    ["lastAttemptAt", ""],
+    ["lastAttemptAt", 123],
+    ["lastSentAt", "not-a-date"],
+    ["lastSentAt", ""],
+    ["lastSentAt", 123],
+  ];
+
+  it.each(malformedInstantCases)(
+    "treats a malformed %s value %p as null",
+    async (field, malformed) => {
+      await writeFile(file, JSON.stringify({ ...canonicalState(), [field]: malformed }));
+
+      expect(await readAlertState(file)).toBeNull();
+    },
+  );
+
+  it("logs unsupported-shape for a malformed instant", async () => {
+    const log = vi.fn();
+    vi.stubGlobal("console", { ...console, log });
+    await writeFile(
+      file,
+      JSON.stringify({ ...canonicalState(), lastCheckAt: "not-a-date" }),
+    );
+
+    expect(await readAlertState(file)).toBeNull();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("unsupported-shape"));
+  });
+
+  it("round-trips the toStateInstant output verbatim on every instant field", async () => {
+    const instant = toStateInstant(new Date("2026-09-11T01:20:00.000Z"));
+    const original: AlertState = {
+      schemaVersion: ALERT_STATE_SCHEMA_VERSION,
+      lastState: "stale",
+      firstAlertDate: "2026-09-08",
+      lastAlertDate: "2026-09-11",
+      lastRecoveryDate: null,
+      lastCheckAt: instant,
+      lastAttemptAt: instant,
+      lastSentAt: instant,
+      lastError: null,
+    };
+    await writeAlertState(file, original);
+
+    const read = await readAlertState(file);
+    expect(read).not.toBeNull();
+    expect(read?.lastCheckAt).toBe(instant);
+    expect(read?.lastAttemptAt).toBe(instant);
+    expect(read?.lastSentAt).toBe(instant);
+  });
+
   it("derives the state path next to the SQLite file", () => {
     expect(alertStatePathFor("file:/app/data/dev.db")).toBe("/app/data/alert-state.json");
   });

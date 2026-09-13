@@ -28,6 +28,7 @@ export interface AlertState {
 export type AlertIntentKind = "send-first" | "send-repeat" | "send-recovery";
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$/;
 const TRACKED_STATES: readonly AlertTrackedState[] = ["ok", "stale", "baseline"];
 const STATE_FILE_NAME = "alert-state.json";
 
@@ -95,8 +96,20 @@ function isDateString(value: unknown): value is string | null {
   return value === null || (typeof value === "string" && DATE_PATTERN.test(value));
 }
 
+/**
+ * toStateInstant() is the sole legitimate writer: Asia/Shanghai seconds
+ * precision with a fixed +08:00 offset. Accepting a looser string lets a
+ * hand-edited malformed value reach the admin page, where new Date(value) is
+ * Invalid Date and Intl.DateTimeFormat.format() throws RangeError (page 500);
+ * rejecting it here makes a damaged file behave like one with no history.
+ */
 function isInstantString(value: unknown): value is string | null {
-  return value === null || typeof value === "string";
+  return (
+    value === null ||
+    (typeof value === "string" &&
+      INSTANT_PATTERN.test(value) &&
+      !Number.isNaN(new Date(value).getTime()))
+  );
 }
 
 /**
